@@ -1374,7 +1374,12 @@ class LeRobotSingleDataset(Dataset):
         trajectory_id, base_index = self.all_steps[index]
         raw_data = self.get_step_data(trajectory_id, base_index)
         data = self.transforms(raw_data)
-        return self._pack_sample(data)
+        sample = self._pack_sample(data)
+        # [Geo-MemoryVLA] episode_id + timestep let the dual memory bank key
+        # history per trajectory; trajectory_id/base_index already computed above.
+        sample["episode_id"] = int(trajectory_id)
+        sample["timestep"] = int(base_index)
+        return sample
 
     def _pack_sample(self, data: dict) -> dict:
         """Pack transformed modality data into training sample format."""
