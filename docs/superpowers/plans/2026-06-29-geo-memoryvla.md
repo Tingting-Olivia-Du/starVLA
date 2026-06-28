@@ -26,166 +26,167 @@
 
 | File | Responsibility | Status |
 | --- | --- | --- |
-| `starVLA/model/modules/encoders/vggt_world_state.py` | Frozen VGGT → `z_t` layer-4 latent `[B, N_g, 1024]` | NEW |
+| `starVLA/model/modules/vggt_world/*` | VGGT-World backbone + flow transformer + losses + solver (11 files) | VENDORED verbatim |
+| `starVLA/model/modules/geomem/world_state_adapter.py` | Wrap `FrozenVGGTBackbone` → `GeometryState` → flattened `[B, L_g, 1024]` | NEW (thin adapter) |
+| `starVLA/model/modules/geomem/imagination_adapter.py` | Wrap `VGGTWorldModel`: imagination loss + imagined subgoal tokens | NEW (thin adapter) |
+| `starVLA/model/modules/geomem/condition_assembler.py` | Project + concat active streams → `[B, L, H]` + mask | NEW |
 | `starVLA/model/modules/memory/dual_memory_bank.py` | Geo + semantic memory banks: store / retrieve / ToMe-consolidate | NEW (lifts MemoryVLA) |
-| `starVLA/model/modules/imagination/geo_flow_imaginer.py` | Flow-transformer, z-prediction, imagines future `z` subgoal | NEW |
 | `starVLA/model/framework/VLM4A/GeoMemoryVLA.py` | Orchestrator: VGGT + Qwen3-VL + memory + imaginer → fused `[B,L,H]` → GR00T head | NEW |
 | `starVLA/dataloader/gr00t_lerobot/datasets.py` | Add `episode_id` + `timestep` to sample dict | MODIFY (~2 lines) |
 | `examples/LIBERO/train_files/geo_memoryvla_libero.yaml` | Training config with ablation switches | NEW |
 | `tests/geomemvla/` | Unit tests for each module | NEW |
 
 **Phasing (each phase is independently runnable):**
-- **Phase A** (Tasks 1-2, 6-8 with memory/imagination disabled): VGGT world-state + GR00T. Proves VGGT plugs into the head.
+- **Phase A** (Tasks 1-2, 6-8 with memory/imagination disabled): vendored VGGT world-state + GR00T. Proves VGGT plugs into the head.
 - **Phase B** (Tasks 3-4): dual memory bank + dataloader episode/timestep.
-- **Phase C** (Task 5): 3D imagination.
-- Tasks 6-8 (framework, config, smoke) gate each phase via config switches.
+- **Phase C** (Task 5): imagination adapter over the vendored VGGTWorldModel.
+- Tasks 6-9 (framework, config, smoke, marker) gate each phase via config switches.
 
 ---
 
-## Task 1: VGGT world-state encoder
+## Task 1: Vendor VGGT-World + world-state adapter
+
+**What changed (read this):** an earlier draft hand-wrote a `VGGTWorldStateEncoder` and a toy
+imaginer from the paper *abstract*. The real VGGT-World implementation is available at
+`/workspace/tingting/vggt-world/vggt/world_model/` (1577 LOC, Meta research license, allows
+derivative works + research use, requires acknowledgement in publications). We **vendor it
+verbatim** and write only a thin adapter. This task does the vendoring + the world-state
+adapter; Task 5 does the imagination adapter.
 
 **Files:**
-- Create: `starVLA/model/modules/encoders/__init__.py` (empty)
-- Create: `starVLA/model/modules/encoders/vggt_world_state.py`
-- Test: `tests/geomemvla/test_vggt_world_state.py`
+- Create: `starVLA/model/modules/vggt_world/` ← copied verbatim from
+  `/workspace/tingting/vggt-world/vggt/world_model/` (all 12 `.py` files: `__init__`,
+  `backbone`, `blocks`, `flow_model`, `losses`, `metrics`, `model`, `rope3d`, `scheduler`,
+  `solver`, `state`, `time_embed`).
+- Create: `starVLA/model/modules/vggt_world/PROVENANCE.md` (source path, license, commit note).
+- Create: `starVLA/model/modules/geomem/__init__.py` (empty)
+- Create: `starVLA/model/modules/geomem/world_state_adapter.py`
+- Test: `tests/geomemvla/test_world_state_adapter.py`
 
 **Interfaces:**
-- Consumes: `vggt` package; config dict with `framework.world_state.{model_name, layer_index, num_cameras}`.
+- Consumes: the vendored `FrozenVGGTBackbone.encode_states(images[B,F,3,H,W]) -> GeometryState`
+  (`backbone.py:84`) and `GeometryState.flatten_streams() -> [B, F*2*tokens, 1024]` (`state.py:55`).
 - Produces:
-  - `class VGGTWorldStateEncoder(nn.Module)`
-  - `__init__(self, model_name="facebook/VGGT-1B", layer_index=4, num_cameras=2)`
-  - `forward(self, pixel_values: torch.Tensor) -> torch.Tensor` where input is `[B, num_views, 3, H, W]` and output is `z_t` of shape `[B, N_g, 1024]` (special tokens dropped).
-  - property `hidden_size -> int` (= 1024)
+  - `class WorldStateAdapter(nn.Module)`:
+    - `__init__(self, pretrained_vggt_repo="facebook/VGGT-1B")` — builds `FrozenVGGTBackbone`.
+    - `encode(self, images: torch.Tensor) -> GeometryState` — passthrough to backbone.
+    - `flatten(self, state) -> torch.Tensor` — `state.flatten_streams()`.
+    - property `hidden_size -> int` (= 1024).
 
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1: Vendor the package**
+
+```bash
+cd /workspace/tingting/starVLA
+mkdir -p starVLA/model/modules/vggt_world tests/geomemvla
+touch tests/geomemvla/__init__.py
+cp /workspace/tingting/vggt-world/vggt/world_model/*.py starVLA/model/modules/vggt_world/
+```
+
+Prepend the `[Geo-MemoryVLA]` provenance header to each vendored file (a one-line sed is
+acceptable since these are verbatim copies):
+
+```bash
+cd /workspace/tingting/starVLA/starVLA/model/modules/vggt_world
+for f in *.py; do
+  printf '# [Geo-MemoryVLA] Vendored verbatim from VGGT-World (Meta research license).\n# Source: /workspace/tingting/vggt-world/vggt/world_model/%s\n# See docs/superpowers/specs/2026-06-29-geo-memoryvla-design.md\n' "$f" | cat - "$f" > "$f.tmp" && mv "$f.tmp" "$f"
+done
+```
+
+Write `PROVENANCE.md`:
+
+```markdown
+# [Geo-MemoryVLA] vggt_world provenance
+Vendored verbatim from https://github.com/sisyphm/vggt-world
+(`vggt/world_model/`), local clone `/workspace/tingting/vggt-world`.
+License: Meta research license (LICENSE.txt in the source repo) — permits derivative
+works and research use; **publications must acknowledge use**. The original `facebook/VGGT-1B`
+weights are non-commercial (use `VGGT-1B-Commercial` for commercial use).
+Do not hand-edit these files except for the provenance header; treat as upstream.
+```
+
+- [ ] **Step 2: Write the failing test**
 
 ```python
-# tests/geomemvla/test_vggt_world_state.py
-# [Geo-MemoryVLA] Unit test for the frozen VGGT world-state encoder.
-import pytest
+# tests/geomemvla/test_world_state_adapter.py
+# [Geo-MemoryVLA] Adapter import + GeometryState flatten contract (no model download).
 import torch
 
 
-def test_module_constructs_and_reports_hidden_size_without_download(monkeypatch):
-    # Stub VGGT.from_pretrained so the test does not download 1B weights.
-    from starVLA.model.modules.encoders import vggt_world_state as mod
+def test_geometry_state_flatten_contract():
+    # Exercises the vendored GeometryState shape contract without loading VGGT.
+    from starVLA.model.modules.vggt_world.state import GeometryState
 
-    class _FakeBlock(torch.nn.Module):
-        def __init__(self, d):
-            super().__init__()
-            self.norm1 = torch.nn.LayerNorm(d)
+    b, f, tok, d = 2, 3, 7, 1024
+    st = GeometryState(
+        frame_tokens=torch.randn(b, f, tok, d),
+        global_tokens=torch.randn(b, f, tok, d),
+        patch_start_idx=5,
+        patch_grid=(1, 1),
+    )
+    flat = st.flatten_streams()
+    assert flat.shape == (b, f * 2 * tok, d)
 
-        def forward(self, x, pos=None):
-            return x
 
-    class _FakeAgg(torch.nn.Module):
-        def __init__(self, d=1024):
-            super().__init__()
-            self.frame_blocks = torch.nn.ModuleList([_FakeBlock(d) for _ in range(2)])
-            self.global_blocks = torch.nn.ModuleList([_FakeBlock(d) for _ in range(2)])
-            self.patch_embed = torch.nn.Identity()
-            self.embed_dim = d
-
-    class _FakeVGGT:
-        def __init__(self):
-            self.aggregator = _FakeAgg()
-
-        @classmethod
-        def from_pretrained(cls, name):
-            return cls()
-
-    monkeypatch.setattr(mod, "_load_vggt", lambda name: _FakeVGGT())
-    enc = mod.VGGTWorldStateEncoder(model_name="fake", layer_index=4, num_cameras=2)
-    assert enc.hidden_size == 1024
-    # All params frozen.
-    assert all(not p.requires_grad for p in enc.parameters())
+def test_adapter_imports_and_exposes_hidden_size():
+    from starVLA.model.modules.geomem.world_state_adapter import WorldStateAdapter
+    # Class is importable and declares the dim without instantiating VGGT.
+    assert WorldStateAdapter.HIDDEN_SIZE == 1024
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [ ] **Step 3: Run test to verify it fails**
 
-Run: `cd /workspace/tingting/starVLA && python -m pytest tests/geomemvla/test_vggt_world_state.py -v`
-Expected: FAIL — `ModuleNotFoundError: starVLA.model.modules.encoders.vggt_world_state`.
+Run: `cd /workspace/tingting/starVLA && python -m pytest tests/geomemvla/test_world_state_adapter.py -v`
+Expected: FAIL — `world_state_adapter` not found (the vendored `state.py` test may already pass).
 
-- [ ] **Step 3: Write minimal implementation**
+- [ ] **Step 4: Write the adapter**
 
 ```python
-# starVLA/model/modules/encoders/vggt_world_state.py
-# [Geo-MemoryVLA] Frozen VGGT-1B world-state encoder.
-# Produces a 3D-geometry latent z_t (layer-4 aggregator tokens) used as the
-# current world state, the unit stored in geometric memory, and the target of
-# imagination. Part of the Geo-MemoryVLA architecture — see
+# starVLA/model/modules/geomem/world_state_adapter.py
+# [Geo-MemoryVLA] Thin starVLA-facing wrapper over the vendored VGGT-World backbone.
+# Turns images into a GeometryState world state and flattens it for downstream
+# memory / condition assembly. Part of the Geo-MemoryVLA architecture — see
 # docs/superpowers/specs/2026-06-29-geo-memoryvla-design.md
-# Adapted from beta-vla (same repo): src/betavla/models/vggt_backbone.py
 from __future__ import annotations
 
 import torch
 import torch.nn as nn
 
-# Number of VGGT aggregator special tokens (1 camera + 4 register) to drop.
-_NUM_SPECIAL_TOKENS = 5
+from starVLA.model.modules.vggt_world.backbone import FrozenVGGTBackbone
 
 
-def _load_vggt(model_name: str):
-    """Isolated for test monkeypatching — loads the real VGGT model."""
-    from vggt.models.vggt import VGGT
+class WorldStateAdapter(nn.Module):
+    HIDDEN_SIZE = 1024
 
-    return VGGT.from_pretrained(model_name)
-
-
-class VGGTWorldStateEncoder(nn.Module):
-    """Frozen VGGT aggregator that returns a layer-`layer_index` geometry latent."""
-
-    def __init__(
-        self,
-        model_name: str = "facebook/VGGT-1B",
-        layer_index: int = 4,
-        num_cameras: int = 2,
-    ) -> None:
+    def __init__(self, pretrained_vggt_repo: str = "facebook/VGGT-1B") -> None:
         super().__init__()
-        vggt = _load_vggt(model_name)
-        self.aggregator = vggt.aggregator
-        self.layer_index = layer_index
-        self.num_cameras = num_cameras
-        self.embed_dim = int(self.aggregator.embed_dim)
-        # Freeze: VGGT is a fixed feature extractor.
-        for p in self.parameters():
-            p.requires_grad_(False)
+        self.backbone = FrozenVGGTBackbone.from_pretrained(pretrained_vggt_repo)
 
     @property
     def hidden_size(self) -> int:
-        return self.embed_dim
+        return self.HIDDEN_SIZE
 
-    @torch.no_grad()
-    def forward(self, pixel_values: torch.Tensor) -> torch.Tensor:
-        """pixel_values: [B, num_views, 3, H, W] -> z_t: [B, N_g, embed_dim].
+    def encode(self, images: torch.Tensor):
+        """images: [B, num_views(*frames), 3, H, W] -> GeometryState (frozen)."""
+        return self.backbone.encode_states(images)
 
-        Uses the VGGT aggregator's own forward to obtain per-layer token lists,
-        selects ``layer_index`` and drops the first ``_NUM_SPECIAL_TOKENS``.
-        """
-        self.aggregator.eval()
-        # VGGT aggregator returns (aggregated_tokens_list, patch_start_idx).
-        tokens_list, patch_start_idx = self.aggregator(pixel_values)
-        z = tokens_list[self.layer_index]  # [B, S, P, C]
-        # Collapse views and drop special tokens.
-        b, s, p, c = z.shape
-        z = z[:, :, patch_start_idx:, :].reshape(b, s * (p - patch_start_idx), c)
-        return z
+    def flatten(self, state) -> torch.Tensor:
+        """GeometryState -> [B, F*2*tokens, 1024]."""
+        return state.flatten_streams()
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [ ] **Step 5: Run test to verify it passes**
 
-Run: `cd /workspace/tingting/starVLA && python -m pytest tests/geomemvla/test_vggt_world_state.py -v`
-Expected: PASS.
+Run: `cd /workspace/tingting/starVLA && python -m pytest tests/geomemvla/test_world_state_adapter.py -v`
+Expected: PASS (both tests).
 
-> Note: the fake in the test exercises construction + freezing + `hidden_size`. The real `forward` path (which depends on the actual VGGT aggregator return signature) is exercised by the GPU smoke test in Task 8, marked `@pytest.mark.slow`. If the real `self.aggregator(...)` return signature differs from `(tokens_list, patch_start_idx)`, adjust `forward` against the installed `vggt` source at that point.
+> The real `encode()` path (downloads VGGT-1B) is exercised in the Task 8 GPU smoke test.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
 cd /workspace/tingting/starVLA
-mkdir -p tests/geomemvla && touch tests/geomemvla/__init__.py
-git add -f starVLA/model/modules/encoders/ tests/geomemvla/test_vggt_world_state.py tests/geomemvla/__init__.py
-git commit -m "[Geo-MemoryVLA] Add frozen VGGT world-state encoder"
+git add -f starVLA/model/modules/vggt_world/ starVLA/model/modules/geomem/ tests/geomemvla/test_world_state_adapter.py tests/geomemvla/__init__.py
+git commit -m "[Geo-MemoryVLA] Vendor VGGT-World + add world-state adapter"
 ```
 
 ---
@@ -193,8 +194,7 @@ git commit -m "[Geo-MemoryVLA] Add frozen VGGT world-state encoder"
 ## Task 2: Stream projector + condition assembler
 
 **Files:**
-- Create: `starVLA/model/modules/geomem/__init__.py` (empty)
-- Create: `starVLA/model/modules/geomem/condition_assembler.py`
+- Create: `starVLA/model/modules/geomem/condition_assembler.py` (the `geomem/__init__.py` already exists from Task 1)
 - Test: `tests/geomemvla/test_condition_assembler.py`
 
 **Interfaces:**
@@ -583,118 +583,142 @@ git commit -m "[Geo-MemoryVLA] Add dual (geometry+semantic) memory bank"
 
 ---
 
-## Task 5: 3D imagination flow-transformer (Phase C)
+## Task 5: Imagination adapter over vendored VGGTWorldModel (Phase C)
+
+**What this is:** NOT a hand-written imaginer. We wrap the vendored `VGGTWorldModel`
+(`modules/vggt_world/model.py`, from Task 1) so Geo-MemoryVLA can (a) compute its imagination
+loss during training and (b) produce an imagined future `GeometryState` (the 3D subgoal) at
+inference. The flow transformer, z-prediction, SNR-weighted stage-1 loss, stage-2 flow-forcing,
+and Euler rollout all live in the vendored code — we do not reimplement them.
 
 **Files:**
-- Create: `starVLA/model/modules/imagination/__init__.py` (empty)
-- Create: `starVLA/model/modules/imagination/geo_flow_imaginer.py`
-- Test: `tests/geomemvla/test_geo_flow_imaginer.py`
+- Create: `starVLA/model/modules/geomem/imagination_adapter.py`
+- Test: `tests/geomemvla/test_imagination_adapter.py`
 
 **Interfaces:**
-- Consumes: nothing from earlier tasks (standalone nn.Module).
+- Consumes (vendored): `VGGTWorldModel(pretrained_vggt_repo=..., chunk_size, context_size, ...)`
+  whose `forward(images[B,F,3,H,W], where=float) -> dict` returns `pred_state_tokens`,
+  `target_state_tokens`, `stage`, `tau`; and `WorldModelLoss(...).forward(predictions, batch)
+  -> {"objective": ...}`. For inference, `VGGTWorldModel.forward(images, ...)` in eval mode runs
+  `_forecast` and returns `forecast_state_tokens` / decoded geometry.
 - Produces:
-  - `class GeoFlowImaginer(nn.Module)`:
-    - `__init__(self, latent_dim: int, horizon: int = 4, depth: int = 4, heads: int = 8)`
-    - `loss(self, z_cur: torch.Tensor, z_future: torch.Tensor) -> torch.Tensor` — flow-matching with **z-prediction** (predicts clean target latent, not velocity). `z_cur [B, N, D]`, `z_future [B, horizon, N, D]` → scalar.
-    - `imagine(self, z_cur: torch.Tensor, steps: int = 4) -> torch.Tensor` — returns `ẑ [B, horizon*N, D]` (the 3D subgoal condition).
+  - `class ImaginationAdapter(nn.Module)`:
+    - `__init__(self, pretrained_vggt_repo="facebook/VGGT-1B", chunk_size=2, context_size=2, latent_weight=1.0, decode_weights=(0.0,0.0,0.0))`
+    - `training_loss(self, images: torch.Tensor, where: float = 0.0) -> torch.Tensor` — runs the
+      world model forward + `WorldModelLoss`, returns the scalar `objective`.
+    - `imagine_tokens(self, images: torch.Tensor, forecast_frames: int) -> torch.Tensor` — eval
+      forecast; returns flattened imagined future tokens `[B, L_img, 1024]` (the subgoal condition).
 
-- [ ] **Step 1: Write the failing test**
+> **Important wiring note for Task 6:** the vendored world model consumes **multi-frame image
+> windows**, not a single VGGT latent. Phase C therefore needs the dataloader to provide a short
+> future-frame window per sample (current `context_size` + future `chunk_size` frames). If the
+> LIBERO dataloader yields only the current frame, the adapter falls back to the **single-frame
+> degenerate mode** (context=target=current) for the smoke path, and the true multi-frame
+> supervision is enabled once the dataloader emits frame windows — tracked as a Phase-C
+> follow-up, analogous to the episode_id/timestep work in Task 3.
+
+- [ ] **Step 1: Write the failing test (no model download — assert API shape only)**
 
 ```python
-# tests/geomemvla/test_geo_flow_imaginer.py
-# [Geo-MemoryVLA] Unit tests for the VGGT-World-style z-prediction flow imaginer.
+# tests/geomemvla/test_imagination_adapter.py
+# [Geo-MemoryVLA] The adapter wraps the vendored VGGTWorldModel; here we only assert
+# the adapter module imports and the vendored loss contract is intact (no VGGT download).
 import torch
-from starVLA.model.modules.imagination.geo_flow_imaginer import GeoFlowImaginer
 
 
-def test_loss_is_finite_scalar():
-    img = GeoFlowImaginer(latent_dim=16, horizon=2)
-    z_cur = torch.randn(2, 4, 16)
-    z_future = torch.randn(2, 2, 4, 16)
-    loss = img.loss(z_cur, z_future)
-    assert loss.dim() == 0 and torch.isfinite(loss)
+def test_world_model_loss_contract():
+    # Vendored WorldModelLoss returns an 'objective' scalar from latent tokens.
+    from starVLA.model.modules.vggt_world.losses import WorldModelLoss
+
+    loss = WorldModelLoss(latent_weight=1.0)
+    preds = {
+        "pred_state_tokens": torch.randn(2, 10, 1024),
+        "target_state_tokens": torch.randn(2, 10, 1024),
+        "stage": "stage2",
+    }
+    out = loss(preds, batch={})
+    assert "objective" in out and out["objective"].dim() == 0
 
 
-def test_imagine_returns_subgoal_tokens():
-    img = GeoFlowImaginer(latent_dim=16, horizon=2)
-    z_cur = torch.randn(2, 4, 16)
-    sub = img.imagine(z_cur, steps=3)
-    assert sub.shape == (2, 2 * 4, 16)  # horizon * N tokens
-    assert torch.isfinite(sub).all()
+def test_adapter_imports():
+    from starVLA.model.modules.geomem.imagination_adapter import ImaginationAdapter
+    assert hasattr(ImaginationAdapter, "training_loss")
+    assert hasattr(ImaginationAdapter, "imagine_tokens")
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cd /workspace/tingting/starVLA && python -m pytest tests/geomemvla/test_geo_flow_imaginer.py -v`
-Expected: FAIL — module not found.
+Run: `cd /workspace/tingting/starVLA && python -m pytest tests/geomemvla/test_imagination_adapter.py -v`
+Expected: FAIL — `imagination_adapter` not found (the vendored-loss test should already pass).
 
-- [ ] **Step 3: Write minimal implementation**
+- [ ] **Step 3: Write the adapter**
 
 ```python
-# starVLA/model/modules/imagination/geo_flow_imaginer.py
-# [Geo-MemoryVLA] Flow-transformer that imagines future VGGT geometry latents.
-# z-prediction parameterization (predict clean target, not velocity) for high SNR
-# in the 1024-D latent, per VGGT-World (arXiv 2603.12655). Output is the 3D visual
-# subgoal condition. Part of the Geo-MemoryVLA architecture — see
+# starVLA/model/modules/geomem/imagination_adapter.py
+# [Geo-MemoryVLA] Adapter over the vendored VGGT-World VGGTWorldModel. Produces the
+# imagination training loss and the imagined future GeometryState (3D visual subgoal).
+# All flow-matching / z-prediction / flow-forcing logic lives in modules/vggt_world.
+# Part of the Geo-MemoryVLA architecture — see
 # docs/superpowers/specs/2026-06-29-geo-memoryvla-design.md
 from __future__ import annotations
 
 import torch
 import torch.nn as nn
 
+from starVLA.model.modules.vggt_world.losses import WorldModelLoss
+from starVLA.model.modules.vggt_world.model import VGGTWorldModel
 
-class GeoFlowImaginer(nn.Module):
-    def __init__(self, latent_dim: int, horizon: int = 4, depth: int = 4, heads: int = 8):
+
+class ImaginationAdapter(nn.Module):
+    def __init__(
+        self,
+        pretrained_vggt_repo: str = "facebook/VGGT-1B",
+        chunk_size: int = 2,
+        context_size: int = 2,
+        latent_weight: float = 1.0,
+        decode_weights: tuple[float, float, float] = (0.0, 0.0, 0.0),
+    ) -> None:
         super().__init__()
-        self.latent_dim = latent_dim
-        self.horizon = horizon
-        self.t_embed = nn.Sequential(nn.Linear(1, latent_dim), nn.SiLU(), nn.Linear(latent_dim, latent_dim))
-        layer = nn.TransformerEncoderLayer(latent_dim, heads, batch_first=True)
-        self.net = nn.TransformerEncoder(layer, num_layers=depth)
-        self.head = nn.Linear(latent_dim, latent_dim)
+        self.world_model = VGGTWorldModel(
+            pretrained_vggt_repo=pretrained_vggt_repo,
+            chunk_size=chunk_size,
+            context_size=context_size,
+        )
+        d_depth, d_point, d_cam = decode_weights
+        self.criterion = WorldModelLoss(
+            latent_weight=latent_weight,
+            decode_depth_weight=d_depth,
+            decode_point_weight=d_point,
+            decode_camera_weight=d_cam,
+        )
 
-    def _denoise(self, z_noisy, z_cur, t):
-        # t: [B] in [0,1]. Condition = current world state tokens prepended.
-        b, m, d = z_noisy.shape
-        temb = self.t_embed(t.view(b, 1, 1).expand(b, 1, 1).reshape(b, 1, 1).float()).expand(b, m, d)
-        x = torch.cat([z_cur, z_noisy + temb], dim=1)
-        x = self.net(x)
-        pred = self.head(x[:, z_cur.shape[1] :, :])  # predict clean future tokens
-        return pred
-
-    def loss(self, z_cur: torch.Tensor, z_future: torch.Tensor) -> torch.Tensor:
-        b, h, n, d = z_future.shape
-        target = z_future.reshape(b, h * n, d)
-        noise = torch.randn_like(target)
-        t = torch.rand(b, device=target.device)
-        z_t = (1 - t).view(b, 1, 1) * noise + t.view(b, 1, 1) * target
-        pred = self._denoise(z_t, z_cur, t)  # z-prediction: predict clean target
-        return ((pred - target) ** 2).mean()
+    def training_loss(self, images: torch.Tensor, where: float = 0.0) -> torch.Tensor:
+        self.world_model.train()
+        preds = self.world_model(images, where=where)
+        return self.criterion(preds, batch={})["objective"]
 
     @torch.no_grad()
-    def imagine(self, z_cur: torch.Tensor, steps: int = 4) -> torch.Tensor:
-        b, n, d = z_cur.shape
-        m = self.horizon * n
-        z = torch.randn(b, m, d, device=z_cur.device, dtype=z_cur.dtype)
-        for k in range(steps):
-            t = torch.full((b,), (k + 1) / steps, device=z_cur.device)
-            pred = self._denoise(z, z_cur, t)
-            # Move toward predicted clean target (simple Euler on z-prediction).
-            z = z + (pred - z) / (steps - k)
-        return z
+    def imagine_tokens(self, images: torch.Tensor, forecast_frames: int) -> torch.Tensor:
+        self.world_model.eval()
+        out = self.world_model(images, forecast_frames=forecast_frames)
+        # pred_state_tokens: flattened future tokens [B, L_img, 1024].
+        return out["pred_state_tokens"]
 ```
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `cd /workspace/tingting/starVLA && python -m pytest tests/geomemvla/test_geo_flow_imaginer.py -v`
-Expected: PASS.
+Run: `cd /workspace/tingting/starVLA && python -m pytest tests/geomemvla/test_imagination_adapter.py -v`
+Expected: PASS (both tests).
+
+> The real `training_loss` / `imagine_tokens` paths (download VGGT-1B, multi-frame windows) are
+> exercised in the Task 8 GPU smoke test, Phase C.
 
 - [ ] **Step 5: Commit**
 
 ```bash
 cd /workspace/tingting/starVLA
-git add -f starVLA/model/modules/imagination/ tests/geomemvla/test_geo_flow_imaginer.py
-git commit -m "[Geo-MemoryVLA] Add z-prediction flow imaginer for 3D subgoals"
+git add -f starVLA/model/modules/geomem/imagination_adapter.py tests/geomemvla/test_imagination_adapter.py
+git commit -m "[Geo-MemoryVLA] Add imagination adapter over vendored VGGTWorldModel"
 ```
 
 ---
@@ -706,7 +730,7 @@ git commit -m "[Geo-MemoryVLA] Add z-prediction flow imaginer for 3D subgoals"
 - Test: `tests/geomemvla/test_geomemvla_framework.py`
 
 **Interfaces:**
-- Consumes: `VGGTWorldStateEncoder` (Task 1), `ConditionAssembler` (Task 2), `DualMemoryBank` (Task 4), `GeoFlowImaginer` (Task 5), starVLA `get_vlm_model`, `get_action_model`, `merge_framework_config`, `FRAMEWORK_REGISTRY`.
+- Consumes: `WorldStateAdapter` (Task 1), `ConditionAssembler` (Task 2), `DualMemoryBank` (Task 4), `ImaginationAdapter` (Task 5), starVLA `get_vlm_model`, `get_action_model`, `merge_framework_config`, `FRAMEWORK_REGISTRY`.
 - Produces:
   - `@FRAMEWORK_REGISTRY.register("GeoMemoryVLA")`
   - `class GeoMemoryVLA(baseframework)` with `forward(examples) -> {"action_loss": ...(+ "imagination_loss")}` and `predict_action(examples) -> {"normalized_actions": np.ndarray}`.
@@ -759,9 +783,9 @@ from deployment.model_server.tools.image_tools import to_pil_preserve
 from starVLA.model.framework.base_framework import baseframework
 from starVLA.model.framework.share_tools import merge_framework_config
 from starVLA.model.modules.action_model.GR00T_ActionHeader import get_action_model
-from starVLA.model.modules.encoders.vggt_world_state import VGGTWorldStateEncoder
 from starVLA.model.modules.geomem.condition_assembler import ConditionAssembler
-from starVLA.model.modules.imagination.geo_flow_imaginer import GeoFlowImaginer
+from starVLA.model.modules.geomem.imagination_adapter import ImaginationAdapter
+from starVLA.model.modules.geomem.world_state_adapter import WorldStateAdapter
 from starVLA.model.modules.memory.dual_memory_bank import DualMemoryBank
 from starVLA.model.modules.vlm import get_vlm_model
 from starVLA.model.tools import FRAMEWORK_REGISTRY
@@ -815,12 +839,9 @@ class GeoMemoryVLA(baseframework):
         self.use_geo = fw.world_state["enabled"] and fw.world_state["stream"] in ("geo_only", "dual")
         self.use_sem = fw.world_state["stream"] in ("sem_only", "dual")
         if self.use_geo:
-            self.vggt = VGGTWorldStateEncoder(
-                model_name=fw.world_state["model_name"],
-                layer_index=fw.world_state["layer_index"],
-                num_cameras=fw.world_state["num_cameras"],
-            )
-            geo_dim = self.vggt.hidden_size
+            # Vendored frozen VGGT-World backbone (Task 1 adapter).
+            self.world_state = WorldStateAdapter(pretrained_vggt_repo=fw.world_state["model_name"])
+            geo_dim = self.world_state.hidden_size  # 1024
         else:
             geo_dim = sem_dim
 
@@ -836,11 +857,15 @@ class GeoMemoryVLA(baseframework):
 
         self.use_imag = fw.imagination["enabled"] and self.use_geo
         if self.use_imag:
-            self.imaginer = GeoFlowImaginer(
-                latent_dim=geo_dim, horizon=fw.imagination["horizon"], depth=fw.imagination["depth"],
+            # Vendored VGGTWorldModel wrapper (Task 5 adapter). chunk/context drive the
+            # imagined horizon; it consumes multi-frame image windows (see Task 5 note).
+            self.imaginer = ImaginationAdapter(
+                pretrained_vggt_repo=fw.world_state["model_name"],
+                chunk_size=int(fw.imagination["horizon"]),
+                context_size=int(fw.imagination.get("context_size", 2)),
             )
         self.imag_loss_scale = float(fw.imagination["loss_scale"])
-        self.imag_steps = int(fw.imagination["steps"])
+        self.imag_horizon = int(fw.imagination["horizon"])
 
         # Condition hidden = GR00T cross_attention_dim. Build assembler over active streams.
         cond_dim = int(fw.action_model.diffusion_model_cfg.cross_attention_dim)
@@ -871,7 +896,8 @@ class GeoMemoryVLA(baseframework):
         geo = None
         if self.use_geo:
             pix = self._build_vggt_pixels(images, device=out.hidden_states[-1].device)
-            geo = self.vggt(pix)  # [B, N_g, geo_dim]
+            state = self.world_state.encode(pix)            # GeometryState (frozen)
+            geo = self.world_state.flatten(state)            # [B, F*2*tokens, 1024]
         return geo, sem
 
     def _build_vggt_pixels(self, images, device):
@@ -882,6 +908,22 @@ class GeoMemoryVLA(baseframework):
             vs = [TF.to_tensor(v.convert("RGB")) for v in views]
             batch.append(torch.stack(vs, dim=0))
         return torch.stack(batch, dim=0).to(device)
+
+    def _build_image_window(self, examples, device):
+        # Multi-frame window for the world model. Prefer an explicit "image_window"
+        # (List[frames][views] of PIL) if the dataloader supplies it; else degenerate
+        # to the current single frame's views (Task 5 note / Phase-C follow-up).
+        import torchvision.transforms.functional as TF
+        windows = []
+        for e in examples:
+            frames = e.get("image_window", [e["image"]])
+            frame_tensors = []
+            for views in frames:
+                vs = [TF.to_tensor(v.convert("RGB")) for v in views]
+                frame_tensors.append(torch.stack(vs, dim=0))   # [num_views, 3, H, W]
+            # Flatten (frames, views) into the world model's frame axis.
+            windows.append(torch.cat(frame_tensors, dim=0))
+        return torch.stack(windows, dim=0).to(device)          # [B, F*views, 3, H, W]
 
     def _assemble(self, geo, sem, m_geo, m_sem, imag):
         streams = {}
@@ -907,15 +949,17 @@ class GeoMemoryVLA(baseframework):
         if self.use_memory:
             m_geo, m_sem = self.memory.process(geo, sem, episode_ids, timesteps)
 
+        device = (sem if sem is not None else geo).device
         imag = None
-        imag_loss = torch.zeros((), device=(sem if sem is not None else geo).device)
+        imag_loss = torch.zeros((), device=device)
         if self.use_imag:
-            imag = self.imaginer.imagine(geo, steps=self.imag_steps)
-            # Self-supervised: imagine should reconstruct a noised copy of current geo
-            # as a proxy when future-frame latents are not precomputed (Phase C stage-1
-            # upgrades this to true future-VGGT targets — see spec §4.3 / §7.3).
-            z_future = geo.unsqueeze(1).expand(-1, self.imaginer.horizon, -1, -1)
-            imag_loss = self.imaginer.loss(geo, z_future)
+            # The vendored world model consumes a multi-frame image window. When the
+            # dataloader provides one ("image_window" key: context+chunk frames), pass it;
+            # otherwise fall back to the current views (degenerate single-step, Task 5 note).
+            # `where` drives the stage-1/stage-2 flow-forcing curriculum.
+            window = self._build_image_window(examples, device=device)
+            imag = self.imaginer.imagine_tokens(window, forecast_frames=self.imag_horizon)
+            imag_loss = self.imaginer.training_loss(window, where=float(kwargs.get("where", 0.0)))
 
         cond, mask = self._assemble(geo, sem, m_geo, m_sem, imag)
 
@@ -956,7 +1000,10 @@ class GeoMemoryVLA(baseframework):
         m_geo = m_sem = None
         if self.use_memory:
             m_geo, m_sem = self.memory.process(geo, sem, episode_ids, timesteps)
-        imag = self.imaginer.imagine(geo, steps=self.imag_steps) if self.use_imag else None
+        imag = None
+        if self.use_imag:
+            window = self._build_image_window(examples, device=geo.device)
+            imag = self.imaginer.imagine_tokens(window, forecast_frames=self.imag_horizon)
         cond, mask = self._assemble(geo, sem, m_geo, m_sem, imag)
 
         state = [e["state"] for e in examples] if "state" in examples[0] else None
@@ -1171,7 +1218,7 @@ def test_forward_and_predict_phase_a():
 - [ ] **Step 2: Run it (expected to validate the real pipeline)**
 
 Run: `cd /workspace/tingting/starVLA && CUDA_VISIBLE_DEVICES=4 python -m pytest tests/geomemvla/test_smoke_gpu.py -v -m slow -s`
-Expected: PASS. If `VGGTWorldStateEncoder.forward` fails on the real aggregator return signature, fix it here against the installed `vggt` source (see Task 1 note), then re-run.
+Expected: PASS. If the vendored `FrozenVGGTBackbone.encode_states` fails on the installed VGGT aggregator (internal API drift), reconcile against `/workspace/tingting/vggt-world/vggt/world_model/backbone.py` and the installed `vggt` source, then re-run.
 
 - [ ] **Step 3: Run Phase B+C smoke (memory + imagination enabled)**
 
@@ -1220,6 +1267,7 @@ git commit -m "[Geo-MemoryVLA] Register slow pytest marker"
 
 ## Self-Review notes
 
-- **Spec coverage:** §0 marker → Global Constraints + every file header. §3 data flow → Task 6 `_encode`/`_assemble`. §4.1 VGGT → Task 1. §4.2 dual memory → Task 4. §4.3 imagination → Task 5. §4.4 Qwen3-VL reuse → Task 6 `_encode`. §4.5 GR00T reuse → Task 6 (head untouched). §4.6 orchestrator → Task 6. §4.7 config → Task 7. §5 ablation switches → Task 6 config + Task 7 yaml + Task 8 phase toggles. §6 phasing → Task 8 phase A/B+C. §7.1 episode/timestep blocker → Task 3. §7.3 future-VGGT supervision → flagged in Task 6 forward comment (stage-1 proxy now, true future targets a follow-up). Covered.
-- **Known simplification to revisit during execution:** Task 6's imagination loss uses current-geo as a self-supervised proxy target (spec §4.3 stage-1 calls for true future-VGGT latents). This keeps Phase C runnable without an offline precompute pipeline; upgrading to real future targets is the first post-smoke refinement and is called out inline.
-- **Type consistency:** `process_batch(tokens, episode_ids, timesteps)` (Task 4) matches Task 6 calls; `forward(vl_embs, actions, state, encoder_attention_mask)` matches the verified GR00T signature; `imagine(z_cur, steps)` / `loss(z_cur, z_future)` (Task 5) match Task 6 usage; `ConditionAssembler.forward(streams)->(cond,mask)` (Task 2) matches `_assemble`.
+- **Spec coverage:** §0 marker → Global Constraints + every file header. §3 data flow → Task 6 `_encode`/`_assemble`. §4.1 VGGT world-state (vendored) → Task 1. §4.2 dual memory → Task 4. §4.3 imagination (vendored VGGTWorldModel) → Task 5. §4.4 Qwen3-VL reuse → Task 6 `_encode`. §4.5 GR00T reuse → Task 6 (head untouched). §4.6 orchestrator → Task 6. §4.7 config → Task 7. §5 ablation switches → Task 6 config + Task 7 yaml + Task 8 phase toggles. §6 phasing → Task 8 phase A/B+C. §7.1 episode/timestep blocker → Task 3. §9 provenance/license → Task 1 PROVENANCE.md + vendored headers. Covered.
+- **Correction applied:** the imaginer is no longer hand-written. Tasks 1 & 5 vendor the real VGGT-World code (`modules/vggt_world/`) and add thin adapters; the previous `GeoFlowImaginer`/`VGGTWorldStateEncoder` toys are removed. This was triggered by the user challenging from-abstract fidelity.
+- **Known follow-up (called out inline, not hidden):** the vendored `VGGTWorldModel` consumes multi-frame image **windows**. The LIBERO dataloader currently yields the current frame's views; until it emits a context+chunk window (an "image_window" key), `_build_image_window` degenerates to single-frame and imagination supervision is weak. Emitting real windows is the Phase-C dataloader follow-up (sibling to Task 3's episode/timestep work).
+- **Type consistency:** `WorldStateAdapter.encode(images)->GeometryState` + `flatten(state)->[B,L_g,1024]` (Task 1) match Task 6 `_encode`; `ImaginationAdapter.training_loss(images, where)->scalar` / `imagine_tokens(images, forecast_frames)->[B,L_img,1024]` (Task 5) match Task 6; `process(geo, sem, episode_ids, timesteps)->(m_geo,m_sem)` (Task 4) matches Task 6; `forward(vl_embs, actions, state, encoder_attention_mask)` matches the verified GR00T signature; `ConditionAssembler.forward(streams)->(cond,mask)` (Task 2) matches `_assemble`.
