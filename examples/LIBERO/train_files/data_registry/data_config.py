@@ -2,6 +2,7 @@
 
 from starVLA.dataloader.gr00t_lerobot.datasets import ModalityConfig
 from starVLA.dataloader.gr00t_lerobot.transform.base import ComposedModalityTransform
+from starVLA.dataloader.gr00t_lerobot.transform.state_action import StateActionToTensor, StateActionTransform
 from starVLA.dataloader.gr00t_lerobot.embodiment_tags import EmbodimentTag
 
 
@@ -67,12 +68,6 @@ class Libero4in1DataConfig:
         return configs
 
     def transform(self):
-        # Lazy import: pytorch3d (required by StateActionTransform) is only
-        # available in full training envs, not in lightweight test runners.
-        from starVLA.dataloader.gr00t_lerobot.transform.state_action import (  # noqa: PLC0415
-            StateActionToTensor,
-            StateActionTransform,
-        )
         return ComposedModalityTransform(transforms=[
             StateActionToTensor(apply_to=self.action_keys),
             StateActionTransform(
