@@ -60,20 +60,28 @@ class _FakeDataset:
             self.modality_keys["image_window"] = ["video.primary_image", "video.wrist_image"]
 
 
-def _fake_data(F):
+def _fake_data(F, with_window=False):
     # (F, H, W, C) uint8 per video key; action/lang minimal.
+    # For video modality the data dict uses the raw key (1 frame each).
+    # For image_window modality get_step_data stores arrays under "image_window.<key>",
+    # so _pack_sample reads "image_window.video.primary_image" etc.
     frame = lambda v: np.full((F, 32, 32, 3), v, dtype=np.uint8)
-    return {
-        "video.primary_image": frame(10),
-        "video.wrist_image": frame(20),
+    data = {
+        "video.primary_image": frame(1)[:1],          # 1 frame for video modality
+        "video.wrist_image": frame(2)[:1],
         "annotation.human.action.task_description": ["pick up the cup"],
         "action.x": np.zeros((8, 1), dtype=np.float32),
     }
+    if with_window:
+        # Simulate the collision-fixed storage: image_window data under prefixed keys.
+        data["image_window.video.primary_image"] = frame(10)  # F frames
+        data["image_window.video.wrist_image"] = frame(20)
+    return data
 
 
 def test_pack_sample_emits_window_when_modality_present():
     dset = _FakeDataset(with_window=True)
-    sample = dset._pack_sample(_fake_data(F=5))
+    sample = dset._pack_sample(_fake_data(F=5, with_window=True))
     assert "image_window" in sample
     assert len(sample["image_window"]) == 5            # F frames
     assert len(sample["image_window"][0]) == 2         # num_views
@@ -85,7 +93,7 @@ def test_pack_sample_emits_window_when_modality_present():
 
 def test_pack_sample_omits_window_when_modality_absent():
     dset = _FakeDataset(with_window=False)
-    sample = dset._pack_sample(_fake_data(F=1))
+    sample = dset._pack_sample(_fake_data(F=1, with_window=False))
     assert "image_window" not in sample
 
 
@@ -150,3 +158,167 @@ def test_gating_resolves_to_and_of_flags():
     assert gate(True, False) is False
     assert gate(False, True) is False
     assert gate(False, False) is False
+
+
+# ---------------------------------------------------------------------------
+# Integration tests: real _get_delta_indices and real data path
+# These tests cover C-1 (dispatch crash) and C-2 (delta_indices collision).
+# ---------------------------------------------------------------------------
+
+def test_delta_indices_no_collision_with_image_window():
+    """C-2 regression: _get_delta_indices must scope keys by modality so that
+    'video.video.primary_image' ([0]) and 'image_window.video.primary_image'
+    ([-1,0,1,2,3]) are distinct entries — not one overwriting the other."""
+    Cfg = _load_libero_cfg()
+    cfg = Cfg()
+    cfg.enable_image_window = True
+    mc = cfg.modality_config()
+
+    # Build a minimal stub of LeRobotSingleDataset just to call _get_delta_indices
+    # without touching any filesystem or network.
+    from starVLA.dataloader.gr00t_lerobot import datasets as ds
+
+    class _MinimalDataset:
+        modality_configs = mc
+
+    stub = _MinimalDataset()
+    di = ds.LeRobotSingleDataset._get_delta_indices(stub)
+
+    # Both modalities share the key "video.primary_image" — they MUST be distinct entries.
+    assert "video.video.primary_image" in di, (
+        f"Missing 'video.video.primary_image' in delta_indices keys: {list(di.keys())}"
+    )
+    assert "image_window.video.primary_image" in di, (
+        f"Missing 'image_window.video.primary_image' in delta_indices keys: {list(di.keys())}"
+    )
+    # Values must differ: video=[0], image_window=[-1,0,1,2,3]
+    assert list(di["video.video.primary_image"]) == [0], (
+        f"video.video.primary_image expected [0], got {di['video.video.primary_image'].tolist()}"
+    )
+    assert list(di["image_window.video.primary_image"]) == [-1, 0, 1, 2, 3], (
+        f"image_window.video.primary_image expected [-1,0,1,2,3], got {di['image_window.video.primary_image'].tolist()}"
+    )
+    # Wrist image same assertion
+    assert "video.video.wrist_image" in di
+    assert "image_window.video.wrist_image" in di
+    assert list(di["video.video.wrist_image"]) == [0]
+    assert list(di["image_window.video.wrist_image"]) == [-1, 0, 1, 2, 3]
+
+
+def test_get_data_by_modality_no_crash_for_image_window():
+    """C-1 regression: get_data_by_modality must not raise ValueError for image_window.
+    Uses a stub that intercepts get_video so no filesystem is needed."""
+    from starVLA.dataloader.gr00t_lerobot import datasets as ds
+
+    Cfg = _load_libero_cfg()
+    cfg = Cfg()
+    cfg.enable_image_window = True
+    mc = cfg.modality_config()
+
+    sentinel = object()  # returned by stubbed get_video
+
+    class _StubDataset:
+        modality_configs = mc
+        delta_indices = ds.LeRobotSingleDataset._get_delta_indices(
+            type("S", (), {"modality_configs": mc})()
+        )
+
+        def get_video(self, trajectory_id, key, base_index, modality="video"):
+            return sentinel
+
+        def get_state_or_action(self, *a, **kw):
+            return None
+
+        def get_language(self, *a, **kw):
+            return []
+
+    stub = _StubDataset()
+    # Must not raise — previously raised ValueError("Invalid modality: image_window")
+    result = ds.LeRobotSingleDataset.get_data_by_modality(
+        stub, trajectory_id=0, modality="image_window", key="video.primary_image", base_index=0
+    )
+    assert result is sentinel, f"Expected sentinel from get_video stub, got {result}"
+
+
+_LIBERO_SPATIAL_PATH = (
+    "playground/Datasets/LEROBOT_LIBERO_DATA/libero_spatial_no_noops_1.0.0_lerobot"
+)
+
+
+def _libero_data_available():
+    import os
+    return os.path.isdir(
+        f"/workspace/tingting/starVLA/{_LIBERO_SPATIAL_PATH}/data/chunk-000"
+    )
+
+
+@pytest.mark.skipif(not _libero_data_available(), reason="LIBERO parquet data not present")
+def test_real_getitem_image_window_no_collision():
+    """End-to-end: build a real LeRobotSingleDataset with enable_image_window=True,
+    call __getitem__, and assert:
+      - sample['image'] has num_views PIL images (1 per view = current frame)
+      - sample['image_window'] has 5 frames each with num_views PIL images
+      - The two are distinct objects (no aliasing / collision)
+    """
+    import pathlib
+    from starVLA.dataloader.gr00t_lerobot import datasets as ds
+    from starVLA.dataloader.gr00t_lerobot.datasets import (
+        LeRobotSingleDataset,
+        DatasetMetadata,
+    )
+    from examples.LIBERO.train_files.data_registry.data_config import Libero4in1DataConfig
+
+    dataset_path = pathlib.Path(f"/workspace/tingting/starVLA/{_LIBERO_SPATIAL_PATH}")
+
+    data_cfg = Libero4in1DataConfig()
+    data_cfg.enable_image_window = True
+    mc = data_cfg.modality_config()
+
+    from starVLA.dataloader.gr00t_lerobot.embodiment_tags import EmbodimentTag
+
+    # LIBERO uses av1-encoded mp4 videos; torchvision_av can handle these.
+    data_cfg_dict = {"lerobot_version": "v2.0", "video_backend": "torchvision_av"}
+    dset = LeRobotSingleDataset(
+        dataset_path=dataset_path,
+        modality_configs=mc,
+        embodiment_tag=EmbodimentTag.FRANKA,
+        video_backend="torchvision_av",
+        data_cfg=data_cfg_dict,
+    )
+
+    # Sample a step from episode 0, frame 5 (safe: episode 0 > 5 frames)
+    sample = dset[5]
+
+    # ---- sample["image"]: current frame, num_views PIL images ----
+    assert "image" in sample, "sample must contain 'image'"
+    num_views = len(data_cfg.video_keys)
+    assert len(sample["image"]) == num_views, (
+        f"Expected {num_views} views in sample['image'], got {len(sample['image'])}"
+    )
+    from PIL import Image as PILImage
+    for img in sample["image"]:
+        assert isinstance(img, PILImage.Image), f"Expected PIL Image, got {type(img)}"
+        assert img.size == (224, 224)
+
+    # ---- sample["image_window"]: 5-frame window, num_views per frame ----
+    assert "image_window" in sample, (
+        "sample must contain 'image_window' when enable_image_window=True"
+    )
+    expected_frames = len(data_cfg.image_window_indices)  # 5
+    assert len(sample["image_window"]) == expected_frames, (
+        f"Expected {expected_frames} frames in image_window, got {len(sample['image_window'])}"
+    )
+    for f_idx, frame_views in enumerate(sample["image_window"]):
+        assert len(frame_views) == num_views, (
+            f"Frame {f_idx}: expected {num_views} views, got {len(frame_views)}"
+        )
+        for v_idx, img in enumerate(frame_views):
+            assert isinstance(img, PILImage.Image), (
+                f"Frame {f_idx} view {v_idx}: expected PIL Image, got {type(img)}"
+            )
+
+    # ---- No collision: image and image_window[1] (delta=0, current frame) ----
+    # They come from independent get_video calls — must be distinct objects.
+    assert sample["image"][0] is not sample["image_window"][1][0], (
+        "sample['image'][0] and image_window[1][0] must be independent objects"
+    )

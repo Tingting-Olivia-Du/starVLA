@@ -1196,11 +1196,16 @@ class LeRobotSingleDataset(Dataset):
         return modality_keys
 
     def _get_delta_indices(self) -> dict[str, np.ndarray]:
-        """Restructure the delta indices to use modality.key as keys instead of just the modalities."""
+        """Restructure the delta indices to use modality.key as keys instead of just the modalities.
+
+        Keys are scoped as "<modality>.<key>" so that different modalities sharing the
+        same raw video key (e.g. "video" and "image_window" both use "video.primary_image")
+        get independent delta-index arrays and do not overwrite each other.
+        """
         delta_indices: dict[str, np.ndarray] = {}
-        for config in self.modality_configs.values():
+        for modality, config in self.modality_configs.items():
             for key in config.modality_keys:
-                delta_indices[key] = np.array(config.delta_indices)
+                delta_indices[f"{modality}.{key}"] = np.array(config.delta_indices)
         return delta_indices
 
     def _init_action_mode(self) -> None:
@@ -1406,14 +1411,20 @@ class LeRobotSingleDataset(Dataset):
         # image_window modality is declared (DataConfig.enable_image_window). Shape:
         # List[F][num_views] of PIL 224x224, matching the per-view format of sample["image"].
         # See docs/superpowers/specs/2026-06-29-geo-memoryvla-image-window-design.md
+        #
+        # [Geo-MemoryVLA collision fix] get_step_data stores image_window arrays under
+        # "image_window.<key>" (e.g. "image_window.video.primary_image") to avoid overwriting
+        # the plain "video.primary_image" (1 current frame) used for sample["image"] above.
         if "image_window" in self.modality_keys:
             window_keys = self.modality_keys["image_window"]
-            num_frames = data[window_keys[0]].shape[0]
+            # Read from the prefixed data key written by get_step_data.
+            first_window_key = f"image_window.{window_keys[0]}"
+            num_frames = data[first_window_key].shape[0]
             image_window = []
             for f in range(num_frames):
                 frame_views = []
                 for video_key in window_keys:
-                    img = Image.fromarray(data[video_key][f]).resize((224, 224))
+                    img = Image.fromarray(data[f"image_window.{video_key}"][f]).resize((224, 224))
                     frame_views.append(img)
                 image_window.append(frame_views)
             sample["image_window"] = image_window
@@ -1465,11 +1476,18 @@ class LeRobotSingleDataset(Dataset):
         data = {}
         # Get the data for all modalities # just for action base data
         self.curr_traj_data = self.get_trajectory_data(trajectory_id)
-        # TODO @JinhuiYE The logic below is poorly implemented. Data reading should be directly based on curr_traj_data.
+        # TODO @JinhuiYye The logic below is poorly implemented. Data reading should be directly based on curr_traj_data.
         for modality in self.modality_keys:
-            # Get the data corresponding to each key in the modality
+            # Get the data corresponding to each key in the modality.
+            # [Geo-MemoryVLA C-2/collision fix] image_window shares raw video key names with
+            # the "video" modality (e.g. both use "video.primary_image"). To avoid overwriting
+            # data["video.primary_image"] (1 frame) with the window array (5 frames), store
+            # image_window results under "image_window.<key>" in the data dict.
             for key in self.modality_keys[modality]:
-                data[key] = self.get_data_by_modality(trajectory_id, modality, key, base_index)
+                if modality == "image_window":
+                    data[f"image_window.{key}"] = self.get_data_by_modality(trajectory_id, modality, key, base_index)
+                else:
+                    data[key] = self.get_data_by_modality(trajectory_id, modality, key, base_index)
         data = self._apply_action_mode(data)
         return data
 
@@ -1622,6 +1640,7 @@ class LeRobotSingleDataset(Dataset):
         trajectory_id: int,
         key: str,
         base_index: int,
+        modality: str = "video",
     ) -> np.ndarray:
         """Get the video frames for a trajectory by a base index.
 
@@ -1630,12 +1649,15 @@ class LeRobotSingleDataset(Dataset):
             trajectory_id (str): The ID of the trajectory.
             key (str): The key of the video.
             base_index (int): The base index of the trajectory.
+            modality (str): The modality name used to look up the correct delta_indices
+                (e.g. "video" or "image_window"). Default "video" preserves backward compat.
 
         Returns:
             np.ndarray: The video frames for the trajectory and frame indices. Shape: (T, H, W, C)
         """
-        # Get the step indices
-        step_indices = self.delta_indices[key] + base_index
+        # Get the step indices — keyed by modality to avoid collision between
+        # "video" (delta=[0]) and "image_window" (delta=[-1,0,1,2,3]).
+        step_indices = self.delta_indices[f"{modality}.{key}"] + base_index
         # print(f"{step_indices=}")
         # Get the trajectory index
         trajectory_index = self.get_trajectory_index(trajectory_id)
@@ -1728,8 +1750,8 @@ class LeRobotSingleDataset(Dataset):
         Returns:
             np.ndarray: The data for the trajectory and step indices.
         """
-        # Get the step indices
-        step_indices = self.delta_indices[key] + base_index
+        # Get the step indices — keyed by modality to match the scoped delta_indices dict.
+        step_indices = self.delta_indices[f"{modality}.{key}"] + base_index
         # Get the trajectory index
         trajectory_index = self.get_trajectory_index(trajectory_id)
         # Get the maximum length of the trajectory
@@ -1769,6 +1791,7 @@ class LeRobotSingleDataset(Dataset):
         trajectory_id: int,
         key: str,
         base_index: int,
+        modality: str = "language",
     ) -> list[str]:
         """Get the language annotation data for a trajectory by step indices.
 
@@ -1777,13 +1800,14 @@ class LeRobotSingleDataset(Dataset):
             trajectory_id (int): The ID of the trajectory.
             key (str): The key of the annotation.
             base_index (int): The base index of the trajectory.
+            modality (str): Modality name for scoped delta_indices lookup. Default "language".
 
         Returns:
             list[str]: The annotation data for the trajectory and step indices. If no matching data is found, return empty strings.
         """
         assert self.curr_traj_data is not None, f"No data found for {trajectory_id=}"
-        # Get the step indices
-        step_indices = self.delta_indices[key] + base_index
+        # Get the step indices — keyed by modality to match the scoped delta_indices dict.
+        step_indices = self.delta_indices[f"{modality}.{key}"] + base_index
         # Get the trajectory index
         trajectory_index = self.get_trajectory_index(trajectory_id)
         # Get the maximum length of the trajectory
@@ -1833,11 +1857,15 @@ class LeRobotSingleDataset(Dataset):
             base_index (int): The base index of the trajectory.
         """
         if modality == "video":
-            return self.get_video(trajectory_id, key, base_index)
+            return self.get_video(trajectory_id, key, base_index, modality="video")
+        elif modality == "image_window":
+            # [Geo-MemoryVLA C-1 fix] Dispatch image_window to get_video with its own
+            # scoped delta_indices (e.g. [-1,0,1,2,3]) rather than raising ValueError.
+            return self.get_video(trajectory_id, key, base_index, modality="image_window")
         elif modality == "state" or modality == "action":
             return self.get_state_or_action(trajectory_id, modality, key, base_index)
         elif modality == "language":
-            return self.get_language(trajectory_id, key, base_index)
+            return self.get_language(trajectory_id, key, base_index, modality="language")
         else:
             raise ValueError(f"Invalid modality: {modality}")
 
@@ -1996,8 +2024,10 @@ class CachedLeRobotSingleDataset(LeRobotSingleDataset):
         self.cached_frames = cached_frames
         self.start_indices = np.cumsum(self.trajectory_lengths) - self.trajectory_lengths
 
-    def get_video(self, trajectory_id: int, key: str, base_index: int) -> np.ndarray:
-        step_indices = self.delta_indices[key] + base_index
+    def get_video(self, trajectory_id: int, key: str, base_index: int, modality: str = "video") -> np.ndarray:
+        # [Geo-MemoryVLA C-2 fix] Use modality-scoped key to disambiguate "video" ([0]) from
+        # "image_window" ([-1,0,1,2,3]) that share the same raw video key strings.
+        step_indices = self.delta_indices[f"{modality}.{key}"] + base_index
         # Get the trajectory index
         trajectory_index = self.get_trajectory_index(trajectory_id)
         # Ensure the indices are within the valid range
@@ -2025,9 +2055,14 @@ class CachedLeRobotSingleDataset(LeRobotSingleDataset):
         self.curr_traj_data = self.get_trajectory_data(trajectory_id)
         # Get the data for all modalities
         for modality in self.modality_keys:
-            # Get the data corresponding to each key in the modality
+            # Get the data corresponding to each key in the modality.
+            # [Geo-MemoryVLA collision fix] image_window shares raw keys with "video"; store
+            # under "image_window.<key>" to prevent overwriting the single-frame video entry.
             for key in self.modality_keys[modality]:
-                data[key] = self.get_data_by_modality(trajectory_id, modality, key, base_index)
+                if modality == "image_window":
+                    data[f"image_window.{key}"] = self.get_data_by_modality(trajectory_id, modality, key, base_index)
+                else:
+                    data[key] = self.get_data_by_modality(trajectory_id, modality, key, base_index)
         return data
 
     def set_transforms_metadata(self, metadata: DatasetMetadata):
