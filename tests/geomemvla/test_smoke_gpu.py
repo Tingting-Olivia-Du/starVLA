@@ -76,3 +76,41 @@ def test_forward_and_predict_geo_only():
     shape = pred["normalized_actions"].shape
     assert shape == (1, 8, 7), f"expected normalized_actions shape (1,8,7), got {shape}"
     print(f"[smoke] predict_action shape = {shape}  — PASS")
+
+
+@pytest.mark.slow
+def test_geo_only_imagination_forward():
+    """Geo-only + imagination ON smoke: image_window → VGGTWorldModel → imagination_loss."""
+    if not torch.cuda.is_available():
+        pytest.skip("needs GPU")
+    from omegaconf import OmegaConf
+
+    from starVLA.model.framework.base_framework import build_framework
+
+    cfg = OmegaConf.load("examples/LIBERO/train_files/geo_memoryvla_libero.yaml")
+    cfg.framework.world_state.stream = "geo_only"     # Qwen-free (transformers env limit)
+    cfg.framework.memory.enabled = False
+    cfg.framework.imagination.enabled = True          # exercise imagination
+
+    model = build_framework(cfg).cuda()
+
+    img = Image.fromarray(np.random.randint(0, 255, (224, 224, 3), dtype=np.uint8))
+    # 5-frame window (context=2 + chunk=2 + 1), 2 views each — matches the dataloader contract.
+    # context_size=2, chunk_size=2 → required_frames for Stage1 = 4; for Stage2 = 5.
+    # With 5 frames × 2 views the backbone sees 10 "frames" (views concatenated as frames),
+    # which satisfies both Stage1 (>=4) and Stage2 (>=5) when where >= stage2_start=0.5.
+    window = [[img, img] for _ in range(5)]
+    sample = {
+        "action": np.random.uniform(-1, 1, (16, 7)).astype(np.float16),
+        "state": np.random.uniform(-1, 1, (1, 7)).astype(np.float16),
+        "image": [img, img],
+        "image_window": window,
+        "lang": "pick up the cup",
+        "episode_id": 0, "timestep": 0,
+    }
+    out = model([sample, dict(sample, lang="open the drawer")])
+    assert torch.isfinite(out["action_loss"]), f"action_loss not finite: {out['action_loss']}"
+    assert "imagination_loss" in out, f"imagination_loss missing; got keys: {list(out.keys())}"
+    assert torch.isfinite(out["imagination_loss"]), f"imagination_loss not finite: {out['imagination_loss']}"
+    print(f"\n[smoke] action_loss = {out['action_loss'].item():.6f}")
+    print(f"[smoke] imagination_loss = {out['imagination_loss'].item():.6f}")
