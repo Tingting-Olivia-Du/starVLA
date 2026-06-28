@@ -2437,10 +2437,16 @@ class LeRobotMixtureDataset(Dataset):
                         break
                     index = random.randint(0, len(self) - 1)
                     
-                raw_data = dataset.get_step_data(trajectory_id, step)    
+                raw_data = dataset.get_step_data(trajectory_id, step)
                 data = dataset.transforms(raw_data)
                 sample = dataset._pack_sample(data)
-                
+                # [Geo-MemoryVLA] B1: attach episode/timestep on the REAL (mixture) training path
+                # so the dual memory bank keys history per trajectory. Phase-A added these only on
+                # the unused LeRobotSingleDataset path, so every sample defaulted to (0,0) and the
+                # memory bank collapsed to one episode bucket. See pipeline-fixes plan B1.
+                sample["episode_id"] = int(trajectory_id)
+                sample["timestep"] = int(step)
+
                 return sample
                 
             except Exception as e:

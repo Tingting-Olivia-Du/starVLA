@@ -4,10 +4,17 @@
 # per-task reviews + GPU smoke bypassed (root cause of the 14 audited bugs).
 # See docs/superpowers/plans/2026-06-29-geo-memoryvla-pipeline-fixes.md
 import ast
+import os
 import pathlib
 
 import pytest
 import torch
+
+_LIBERO_DATA_ROOT = "/workspace/tingting/starVLA/playground/Datasets/LEROBOT_LIBERO_DATA"
+
+
+def _libero_data_available():
+    return os.path.isdir(_LIBERO_DATA_ROOT)
 
 
 # ----------------------------------------------------------------------------
@@ -118,3 +125,36 @@ def test_build_image_window_allow_degenerate_no_crash():
     # training path on the same input still raises (real misconfig).
     with pytest.raises(ValueError, match="image_window"):
         obj._build_image_window(examples, device="cpu", allow_degenerate=False)
+
+
+# ----------------------------------------------------------------------------
+# B1 — the REAL (mixture) training path attaches episode_id/timestep.
+# ----------------------------------------------------------------------------
+def test_mixture_getitem_source_sets_episode_timestep():
+    src = pathlib.Path("starVLA/dataloader/gr00t_lerobot/datasets.py").read_text()
+    ast.parse(src)
+    # the mixture __getitem__ must set both keys (Phase-A only set them on the single path).
+    assert 'sample["episode_id"] = int(trajectory_id)' in src
+    assert 'sample["timestep"] = int(step)' in src
+
+
+@pytest.mark.skipif(not _libero_data_available(), reason="LIBERO parquet data not present")
+def test_real_mixture_getitem_has_episode_timestep():
+    # Build a real 1-dataset mixture (libero_goal) and assert the keys reach samples and vary.
+    from omegaconf import OmegaConf
+    from starVLA.dataloader.lerobot_datasets import get_vla_dataset
+
+    data_cfg = OmegaConf.create({
+        "data_root_dir": _LIBERO_DATA_ROOT,
+        "data_mix": "libero_goal",
+        "video_backend": "torchvision_av",
+        "enable_image_window": False,  # memory keying test; window not needed here
+    })
+    dset = get_vla_dataset(data_cfg=data_cfg, mode="train")
+    s0, s1 = dset[0], dset[1]
+    for s in (s0, s1):
+        assert "episode_id" in s and isinstance(s["episode_id"], int)
+        assert "timestep" in s and isinstance(s["timestep"], int)
+    # Not all samples collapse to (0,0): at least one of the two differs in episode or timestep.
+    assert (s0["episode_id"], s0["timestep"]) != (s1["episode_id"], s1["timestep"]) or \
+           s0["timestep"] != 0 or s1["timestep"] != 0
