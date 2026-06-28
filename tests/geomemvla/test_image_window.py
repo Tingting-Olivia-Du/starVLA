@@ -27,7 +27,8 @@ def test_modality_config_includes_window_when_enabled():
     mc = c.modality_config()
     assert "image_window" in mc
     assert mc["image_window"].delta_indices == [-1, 0, 1, 2, 3]
-    assert mc["image_window"].modality_keys == c.video_keys
+    # [Geo-MemoryVLA] S1: image_window is single-camera (primary only) so frames == timesteps.
+    assert mc["image_window"].modality_keys == [c.video_keys[0]]
 
 
 def test_modality_config_omits_window_when_disabled():
@@ -57,7 +58,8 @@ class _FakeDataset:
             "action": ["action.x"],
         }
         if with_window:
-            self.modality_keys["image_window"] = ["video.primary_image", "video.wrist_image"]
+            # [Geo-MemoryVLA] S1: image_window is single-camera (primary only).
+            self.modality_keys["image_window"] = ["video.primary_image"]
 
 
 def _fake_data(F, with_window=False):
@@ -74,8 +76,8 @@ def _fake_data(F, with_window=False):
     }
     if with_window:
         # Simulate the collision-fixed storage: image_window data under prefixed keys.
+        # [Geo-MemoryVLA] S1: single-camera window -> only the primary key is stored.
         data["image_window.video.primary_image"] = frame(10)  # F frames
-        data["image_window.video.wrist_image"] = frame(20)
     return data
 
 
@@ -84,7 +86,7 @@ def test_pack_sample_emits_window_when_modality_present():
     sample = dset._pack_sample(_fake_data(F=5, with_window=True))
     assert "image_window" in sample
     assert len(sample["image_window"]) == 5            # F frames
-    assert len(sample["image_window"][0]) == 2         # num_views
+    assert len(sample["image_window"][0]) == 1         # single-camera (S1)
     assert isinstance(sample["image_window"][0][0], Image.Image)
     assert sample["image_window"][0][0].size == (224, 224)
     # current frame still present and single-frame-per-view
@@ -198,11 +200,11 @@ def test_delta_indices_no_collision_with_image_window():
     assert list(di["image_window.video.primary_image"]) == [-1, 0, 1, 2, 3], (
         f"image_window.video.primary_image expected [-1,0,1,2,3], got {di['image_window.video.primary_image'].tolist()}"
     )
-    # Wrist image same assertion
+    # Wrist image: present in the observation (video) modality with [0].
     assert "video.video.wrist_image" in di
-    assert "image_window.video.wrist_image" in di
     assert list(di["video.video.wrist_image"]) == [0]
-    assert list(di["image_window.video.wrist_image"]) == [-1, 0, 1, 2, 3]
+    # [Geo-MemoryVLA] S1: image_window is primary-only, so there is NO wrist window key.
+    assert "image_window.video.wrist_image" not in di
 
 
 def test_get_data_by_modality_no_crash_for_image_window():
@@ -308,9 +310,10 @@ def test_real_getitem_image_window_no_collision():
     assert len(sample["image_window"]) == expected_frames, (
         f"Expected {expected_frames} frames in image_window, got {len(sample['image_window'])}"
     )
+    # [Geo-MemoryVLA] S1: image_window is single-camera (primary only) -> 1 view per frame.
     for f_idx, frame_views in enumerate(sample["image_window"]):
-        assert len(frame_views) == num_views, (
-            f"Frame {f_idx}: expected {num_views} views, got {len(frame_views)}"
+        assert len(frame_views) == 1, (
+            f"Frame {f_idx}: expected 1 view (single-camera window), got {len(frame_views)}"
         )
         for v_idx, img in enumerate(frame_views):
             assert isinstance(img, PILImage.Image), (

@@ -60,10 +60,14 @@ class Libero4in1DataConfig:
         }
         # [Geo-MemoryVLA] Declare the window modality only when enabled (imagination on).
         # Omitting it => no extra frame reads and no image_window key in the sample.
+        # S1 fix: image_window is a SINGLE-CAMERA temporal sequence (primary only) — VGGT-World
+        # is a monocular-trajectory world model, so its frame axis must be TIME, not views.
+        # Using all video_keys interleaved views into the time axis (views mistaken for
+        # timesteps). Multi-view imagination is a deferred extension (VGGT supports multi-view).
         if self.enable_image_window:
             configs["image_window"] = ModalityConfig(
                 delta_indices=self.image_window_indices,
-                modality_keys=self.video_keys,
+                modality_keys=[self.video_keys[0]],  # primary camera only -> frames == timesteps
             )
         return configs
 

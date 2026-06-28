@@ -6,6 +6,7 @@
 import ast
 import pathlib
 
+import pytest
 import torch
 
 
@@ -61,3 +62,59 @@ def test_where_crosses_stage2_threshold():
     early = 100 / max(1, max_steps)
     late = 800 / max(1, max_steps)
     assert early < stage2_start <= late  # stage-2 engages in the back half
+
+
+# ----------------------------------------------------------------------------
+# S1 — image_window is a SINGLE-CAMERA temporal sequence (frames == timesteps).
+# ----------------------------------------------------------------------------
+def test_image_window_modality_is_single_camera():
+    import importlib
+    mod = importlib.import_module("examples.LIBERO.train_files.data_registry.data_config")
+    c = mod.Libero4in1DataConfig()
+    c.enable_image_window = True
+    mc = c.modality_config()
+    # window uses ONLY the primary camera key (not both views) so frames == timesteps.
+    assert mc["image_window"].modality_keys == [c.video_keys[0]]
+    # observation path still uses all views (untouched).
+    assert mc["video"].modality_keys == c.video_keys
+
+
+def test_build_image_window_single_view_shape_and_guard():
+    from starVLA.model.framework.VLM4A.GeoMemoryVLA import GeoMemoryVLA
+    from PIL import Image
+    import numpy as np
+
+    obj = GeoMemoryVLA.__new__(GeoMemoryVLA)
+    obj.use_imag = True
+    obj._imag_window_len = 5
+    img = Image.fromarray(np.zeros((8, 8, 3), dtype=np.uint8))
+    # single-view window: List[F][1] — 5 frames, 1 view each.
+    examples = [{"image": [img], "image_window": [[img] for _ in range(5)]}]
+    out = obj._build_image_window(examples, device="cpu")
+    assert out.shape[0] == 1 and out.shape[1] == 5  # [B, F=5, 3, H, W] — frames == timesteps
+
+    # A view-interleaved window (10 entries) must now TRIP the guard.
+    bad = [{"image": [img], "image_window": [[img, img] for _ in range(5)]}]  # 10 entries
+    with pytest.raises(AssertionError, match="frame count"):
+        obj._build_image_window(bad, device="cpu")
+
+
+# ----------------------------------------------------------------------------
+# S2 — predict_action's degenerate window must NOT crash at inference.
+# ----------------------------------------------------------------------------
+def test_build_image_window_allow_degenerate_no_crash():
+    from starVLA.model.framework.VLM4A.GeoMemoryVLA import GeoMemoryVLA
+    from PIL import Image
+    import numpy as np
+
+    obj = GeoMemoryVLA.__new__(GeoMemoryVLA)
+    obj.use_imag = True
+    obj._imag_window_len = 5
+    img = Image.fromarray(np.zeros((8, 8, 3), dtype=np.uint8))
+    examples = [{"image": [img, img]}]  # no image_window (inference)
+    # inference path: must replicate to a valid [B,5,...] window, NOT raise.
+    out = obj._build_image_window(examples, device="cpu", allow_degenerate=True)
+    assert out.shape[0] == 1 and out.shape[1] == 5
+    # training path on the same input still raises (real misconfig).
+    with pytest.raises(ValueError, match="image_window"):
+        obj._build_image_window(examples, device="cpu", allow_degenerate=False)

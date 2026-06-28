@@ -177,29 +177,45 @@ class GeoMemoryVLA(baseframework):
             batch.append(torch.stack(vs, dim=0))
         return torch.stack(batch, dim=0).to(device)
 
-    def _build_image_window(self, examples, device):
-        # [Geo-MemoryVLA] Multi-frame window for the world model. imagination ON requires the
-        # dataloader to supply "image_window" (see image-window design spec). A missing window
-        # while imagination is on is a hard error — silently degenerating to a single frame
-        # would look like imagination is training when it is not.
+    def _build_image_window(self, examples, device, allow_degenerate=False):
+        # [Geo-MemoryVLA] Single-camera temporal window for the world model (S1: image_window is
+        # primary-only, so the frame axis is TIME, not views). Shape -> [B, F, 3, H, W].
+        # TRAINING (allow_degenerate=False): a missing "image_window" while imagination is on is a
+        # hard error (silent single-frame degeneration would look like imagination trains when it
+        # does not). INFERENCE (allow_degenerate=True, S2): no rolling buffer exists, so replicate
+        # the current frame to the window length -> a valid static temporal window, no crash.
         import torchvision.transforms.functional as TF
+        win_len = int(getattr(self, "_imag_window_len", 5))
         windows = []
         for e in examples:
-            if "image_window" not in e:
-                if getattr(self, "use_imag", False):
-                    raise ValueError(
-                        "GeoMemoryVLA: imagination enabled but batch has no 'image_window'. "
-                        "Enable the image_window dataloader modality "
-                        "(datasets.vla_data.enable_image_window=true) — see "
-                        "docs/superpowers/specs/2026-06-29-geo-memoryvla-image-window-design.md"
-                    )
-            frames = e.get("image_window", [e["image"]])
+            if "image_window" in e:
+                frames = e["image_window"]                      # List[F][views]
+            elif allow_degenerate:
+                # Replicate current frame's primary view to the temporal window length.
+                primary = [e["image"][0]] if isinstance(e["image"], (list, tuple)) else [e["image"]]
+                frames = [primary for _ in range(win_len)]
+            elif getattr(self, "use_imag", False):
+                raise ValueError(
+                    "GeoMemoryVLA: imagination enabled but batch has no 'image_window'. "
+                    "Enable the image_window dataloader modality "
+                    "(datasets.vla_data.enable_image_window=true) — see "
+                    "docs/superpowers/specs/2026-06-29-geo-memoryvla-image-window-design.md"
+                )
+            else:
+                frames = [e["image"]]
             frame_tensors = []
             for views in frames:
                 vs = [TF.to_tensor(v.convert("RGB")) for v in views]
-                frame_tensors.append(torch.stack(vs, dim=0))   # [num_views, 3, H, W]
+                frame_tensors.append(torch.stack(vs, dim=0))   # [num_views(=1), 3, H, W]
             windows.append(torch.cat(frame_tensors, dim=0))
-        out = torch.stack(windows, dim=0).to(device)           # [B, F*views, 3, H, W]
+        out = torch.stack(windows, dim=0).to(device)           # [B, F, 3, H, W] (single-view)
+        # [Geo-MemoryVLA] S1 live guard (was dead): frame axis must equal the temporal window
+        # length, i.e. frames == timesteps. Catches any view/time-axis regression.
+        if getattr(self, "use_imag", False):
+            assert out.shape[1] == win_len, (
+                f"image_window frame count {out.shape[1]} != expected {win_len} "
+                f"(single-view temporal window). See pipeline-fixes plan S1."
+            )
         return out
 
     def _assemble(self, geo, sem, m_geo, m_sem, imag):
@@ -279,7 +295,9 @@ class GeoMemoryVLA(baseframework):
             m_geo, m_sem = self.memory.process(geo, sem, episode_ids, timesteps)
         imag = None
         if self.use_imag:
-            window = self._build_image_window(examples, device=geo.device)
+            # [Geo-MemoryVLA] S2: inference samples carry no image_window (no rolling buffer),
+            # so allow a degenerate static window instead of crashing the eval server.
+            window = self._build_image_window(examples, device=geo.device, allow_degenerate=True)
             imag = self.imaginer.imagine_tokens(window, forecast_frames=self.imag_horizon)
         cond, mask = self._assemble(geo, sem, m_geo, m_sem, imag)
 

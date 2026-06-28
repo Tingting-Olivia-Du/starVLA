@@ -95,11 +95,10 @@ def test_geo_only_imagination_forward():
     model = build_framework(cfg).cuda()
 
     img = Image.fromarray(np.random.randint(0, 255, (224, 224, 3), dtype=np.uint8))
-    # 5-frame window (context=2 + chunk=2 + 1), 2 views each — matches the dataloader contract.
-    # context_size=2, chunk_size=2 → required_frames for Stage1 = 4; for Stage2 = 5.
-    # With 5 frames × 2 views the backbone sees 10 "frames" (views concatenated as frames),
-    # which satisfies both Stage1 (>=4) and Stage2 (>=5) when where >= stage2_start=0.5.
-    window = [[img, img] for _ in range(5)]
+    # [Geo-MemoryVLA] S1: image_window is a SINGLE-CAMERA temporal sequence (frames == timesteps).
+    # 5 frames (context=2 + chunk=2 + 1), ONE view each — matches the single-view dataloader
+    # contract so the world model reads 5 timesteps (not 10 view-interleaved slots).
+    window = [[img] for _ in range(5)]
     sample = {
         "action": np.random.uniform(-1, 1, (16, 7)).astype(np.float16),
         "state": np.random.uniform(-1, 1, (1, 7)).astype(np.float16),
