@@ -166,4 +166,4 @@ tests/geomemvla/test_world_state_adapter.py::test_adapter_imports_and_exposes_hi
 
 ### Commit Hash
 
-(see below after commit)
+`ef448b0`
