@@ -89,7 +89,10 @@ class MemoryBank(nn.Module):
             eid = int(episode_ids[i])
             ts = int(timesteps[i])
             cur = tokens[i : i + 1]  # [1, N, D]
-            hist = self.bank.get(eid, [])
+            # [Geo-MemoryVLA] B2: order history by timestep before PE/retrieval/consolidation.
+            # The mixture sampler can deliver an episode's steps out of order; memory is temporal,
+            # so timestep PE and ToMe consecutive-pair merging must operate on time order.
+            hist = sorted(self.bank.get(eid, []), key=lambda x: x[0])
             if hist:
                 feats = []
                 for h_ts, h_feat in hist:

@@ -2372,9 +2372,35 @@ class LeRobotMixtureDataset(Dataset):
         self.epoch = epoch
         # self.sampled_steps = self.sample_epoch()
 
+    def _build_sequential_index(self) -> list:
+        """[Geo-MemoryVLA] B2/B3: flat (dataset, trajectory_id, base_index) list in episode order.
+
+        Built once and cached. Walking it in order yields each trajectory's steps
+        contiguously (0..len-1), so the memory bank sees temporally-ordered history.
+        """
+        flat = []
+        for dataset in self.datasets:
+            for t_idx, trajectory_id in enumerate(dataset.trajectory_ids):
+                length = int(dataset.trajectory_lengths[t_idx])
+                for base_index in range(length):
+                    flat.append((dataset, trajectory_id, base_index))
+        return flat
+
     def sample_step(self, index: int) -> tuple[LeRobotSingleDataset, int, int]:
         """Sample a single step from the dataset."""
-        # return self.sampled_steps[index]
+        # [Geo-MemoryVLA] B2/B3: honor sequential_step_sampling so the memory bank sees ordered,
+        # contiguous episode steps. Previously this flag (set in the YAML) was read by NO code and
+        # sampling was always random, defeating the temporal-memory premise.
+        seq = False
+        if getattr(self, "data_cfg", None) is not None:
+            try:
+                seq = bool(self.data_cfg.get("sequential_step_sampling", False))
+            except (AttributeError, TypeError):
+                seq = False
+        if seq:
+            if getattr(self, "_sequential_index", None) is None:
+                self._sequential_index = self._build_sequential_index()
+            return self._sequential_index[index % len(self._sequential_index)]
 
         # Set seed
         seed = index if self.mode != "train" else safe_hash((self.epoch, index, self.seed))
