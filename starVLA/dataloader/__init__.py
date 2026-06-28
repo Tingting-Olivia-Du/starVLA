@@ -46,9 +46,18 @@ def build_dataloader(cfg, dataset_py="lerobot_datasets_oxe"): # TODO now here on
             from examples.LIBERO.train_files.data_registry.data_config import ROBOT_TYPE_CONFIG_MAP
             _enable_win = bool(cfg.datasets.vla_data.get("enable_image_window", True)) and \
                           bool(cfg.framework.imagination.get("enabled", False))
+            # [Geo-MemoryVLA] keep the window length in sync with the imagination config so the
+            # dataloader window (context+chunk+1) matches the world model's context/chunk.
+            _imag = cfg.framework.get("imagination", {}) if hasattr(cfg, "framework") else {}
+            _ctx = int(_imag.get("context_size", 2))
+            _chunk = int(_imag.get("horizon", 2))
             for _dc in ROBOT_TYPE_CONFIG_MAP.values():
                 if hasattr(_dc, "enable_image_window"):
                     _dc.enable_image_window = _enable_win
+                    if hasattr(_dc, "image_window_context"):
+                        _dc.image_window_context = _ctx
+                    if hasattr(_dc, "image_window_chunk"):
+                        _dc.image_window_chunk = _chunk
         except (ImportError, AttributeError, KeyError) as _e:
             # [Geo-MemoryVLA] non-LIBERO runs / missing keys: leave DataConfig defaults.
             # Narrowed (not bare Exception) so real mistakes surface instead of silently

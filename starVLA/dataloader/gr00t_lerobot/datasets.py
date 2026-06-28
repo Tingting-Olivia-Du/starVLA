@@ -2063,6 +2063,10 @@ class CachedLeRobotSingleDataset(LeRobotSingleDataset):
                     data[f"image_window.{key}"] = self.get_data_by_modality(trajectory_id, modality, key, base_index)
                 else:
                     data[key] = self.get_data_by_modality(trajectory_id, modality, key, base_index)
+        # [Geo-MemoryVLA] cleanup: the base get_step_data applies action-mode normalization; the
+        # Cached override dropped it, so delta/rel action modes returned absolute actions while
+        # stats were delta/rel (normalization mismatch). Mirror the base behavior here.
+        data = self._apply_action_mode(data)
         return data
 
     def set_transforms_metadata(self, metadata: DatasetMetadata):
