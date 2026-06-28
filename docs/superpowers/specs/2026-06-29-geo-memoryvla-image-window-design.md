@@ -21,8 +21,17 @@ Geo-MemoryVLA's imagination (the vendored `VGGTWorldModel`) can actually train. 
 `imagination.enabled` switch that the parent project shipped defaulted **off** because the
 single-frame dataloader made the vendored world model crash / degenerate.
 
-The window must satisfy the vendored model's requirement `F >= context_size + chunk_size`
-(`vggt_world/model.py:_stage1_forward` raises `ValueError` otherwise).
+The window must satisfy the vendored model's **Stage-2** requirement
+`F >= context_size + chunk_size + 1` (`vggt_world/model.py:_stage2_forward`,
+`required_frames = context_size + chunk_size + 1`, raises `ValueError` otherwise; Stage-1 only
+needs `context_size + chunk_size`, but the window must cover the stricter Stage-2 case).
+
+**Defaults follow the VGGT-World paper (arXiv 2603.12655), read from the PDF:** the paper's
+Teacher-Forcing stage uses "chunks of size 4, where the first two frames serve as the conditioning
+context to predict the subsequent two" → **context k=2, chunk m=2**; the Stage-2
+Trajectory-Consistent Flow Forcing uses "chunks of length 5 (e.g., [0,1,2,3,4])". The vendored
+`VGGTWorldModel.__init__` defaults (`context_size=2, chunk_size=2`) match the paper exactly. So our
+imagination defaults are `context_size=2, horizon(=chunk)=2`, giving a **5-frame** window.
 
 ---
 
@@ -30,9 +39,10 @@ The window must satisfy the vendored model's requirement `F >= context_size + ch
 
 | Decision | Choice |
 | --- | --- |
-| Window frame range | **Past context + future chunk**: `[-(context_size-1) .. 0 .. +chunk_size]`, aligning with the vendored model's `slice_frames(context, context+chunk)` (teacher-forced: past conditions, future supervises). |
+| Window frame range | **Past context + future chunk + Stage-2's extra frame**: `[-(context_size-1) .. 0 .. +chunk_size]`, i.e. `context_size + chunk_size + 1` frames total. Aligns with the vendored model's Stage-2 `required_frames = context+chunk+1` and the paper's 5-frame `[0,1,2,3,4]`. |
+| Default values (paper) | **`context_size=2, chunk_size(horizon)=2`** per VGGT-World arXiv 2603.12655 (k=2, m=2). Window = **5 frames**, `image_window_indices = [-1, 0, 1, 2, 3]` (1 past + current + 3 future). The current GeoMemoryVLA `horizon=4` is **corrected to 2** to match the paper. |
 | Generation mechanism | **Dedicated `image_window` modality** (own `ModalityConfig` + `delta_indices`), NOT a change to the shared `observation_indices`. Keeps the main observation path = current frame only. |
-| Window-length source of truth | **Derived** from `framework.imagination.{context_size, horizon}` — never hand-filled twice. `image_window_indices = list(range(-(context_size-1), chunk_size+1))` where `chunk_size = horizon`. |
+| Window-length source of truth | **Derived** from `framework.imagination.{context_size, horizon}` — never hand-filled twice. `image_window_indices = list(range(-(context_size-1), chunk_size+2))` where `chunk_size = horizon` (the `+2` upper bound = `chunk_size+1` future frames, covering Stage-2's extra frame). With defaults: `range(-1, 4) = [-1,0,1,2,3]`, 5 frames. |
 | `enable_image_window` default | **`true`**, but generation **follows `imagination.enabled`**: window is produced only when imagination is on (imagination off → not declared → zero extra frame reads). Default config also flips `imagination.enabled: true` so it trains out of the box. |
 | Frame format | `image_window` = `List[F][num_views]` of PIL.Image 224×224, element-wise identical to `image`. Matches `_build_image_window`'s existing stack into `[B, F*views, 3, H, W]`. |
 
@@ -42,7 +52,7 @@ The window must satisfy the vendored model's requirement `F >= context_size + ch
 
 ```
 data_config (LIBERO DataConfig)
-  image_window_indices = list(range(-(context_size-1), chunk_size+1))   # e.g. ctx=2,chunk=4 -> [-1,0,1,2,3,4]
+  image_window_indices = list(range(-(context_size-1), chunk_size+2))   # paper ctx=2,chunk=2 -> [-1,0,1,2,3] (5 frames)
   (declared only when imagination active)
         │
         ▼
@@ -59,7 +69,7 @@ GeoMemoryVLA._build_image_window(examples)
   └─ EXISTING: reads e["image_window"] -> [B, F*views, 3, H, W]; now F>1 for real
         │
         ▼
-ImaginationAdapter -> vendored VGGTWorldModel  (F >= context+chunk satisfied; no crash/degeneration)
+ImaginationAdapter -> vendored VGGTWorldModel  (F = context+chunk+1 satisfied; no crash/degeneration)
         └─ training_loss (stage1/stage2 flow-forcing) + imagine_tokens (subgoal)
 ```
 
@@ -92,7 +102,10 @@ all existing machinery. We only declare the indices and pack one extra key.
 ### 4.3 GeoMemoryVLA — error-handling hardening (MODIFY ~15 LOC)
 - File: `starVLA/model/framework/VLM4A/GeoMemoryVLA.py`.
 - **Construct-time check** (`__init__`): when `imagination.enabled=true`, assert the derived window
-  length `>= context_size + chunk_size`; else `raise ValueError` pointing to this spec.
+  length `>= context_size + chunk_size + 1` (the Stage-2 requirement); else `raise ValueError`
+  pointing to this spec.
+- **Default correction:** change the `imagination` default `horizon` from `4` to `2` (paper m=2) in
+  `GeoMemoryVLADefaultConfig`, so the framework default matches VGGT-World and the derived window.
 - **Runtime upgrade** (`_build_image_window`): when `imagination.enabled=true` but a batch example
   lacks `"image_window"`, **upgrade the existing warn-once to a hard `raise`** (silent single-frame
   degeneration while believing imagination trains is the dangerous failure). Imagination-off path
@@ -104,6 +117,7 @@ all existing machinery. We only declare the indices and pack one extra key.
 - File: `examples/LIBERO/train_files/geo_memoryvla_libero.yaml`.
 - Add `datasets.vla_data.enable_image_window: true`.
 - Flip `framework.imagination.enabled` back to `true` (prerequisite now satisfied).
+- Set `framework.imagination.horizon: 2` (paper chunk m=2) — replacing the prior `4`.
 
 ---
 
@@ -122,7 +136,7 @@ all existing machinery. We only declare the indices and pack one extra key.
 
 | Test | Verifies | Type |
 | --- | --- | --- |
-| `test_image_window_indices_derivation` | `range(-(ctx-1), chunk+1)` correct; length == ctx+chunk | fast |
+| `test_image_window_indices_derivation` | `range(-(ctx-1), chunk+2)` correct (paper k=2,m=2 -> [-1,0,1,2,3]); length == ctx+chunk+1 (5 for paper defaults) | fast |
 | `test_pack_sample_emits_window` | given fake multi-frame data, `_pack_sample` emits `image_window` = List[F][views] PIL 224×224, and `image` is still the current frame | fast (mock, no real data) |
 | `test_episode_boundary_clamp` | base_index=0 (episode head): past frames clamp to frame 0, no bleed into prior episode | fast |
 | `test_build_image_window_raises_without_window_when_imag_on` | imagination on + no `image_window` → raises (defense line 2) | fast |
