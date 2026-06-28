@@ -41,9 +41,15 @@ def _auto_import_framework_modules() -> None:
             for _, sub_name, _ in pkgutil.iter_modules([str(sub_dir)]):
                 if sub_name.startswith("_"):
                     continue
-                importlib.import_module(f"starVLA.model.framework.{module_name}.{sub_name}")
+                try:
+                    importlib.import_module(f"starVLA.model.framework.{module_name}.{sub_name}")
+                except Exception as e:
+                    logger.warning(f"Could not auto-import framework module {module_name}.{sub_name}: {e}")
         else:
-            importlib.import_module(f"starVLA.model.framework.{module_name}")
+            try:
+                importlib.import_module(f"starVLA.model.framework.{module_name}")
+            except Exception as e:
+                logger.warning(f"Could not auto-import framework module {module_name}: {e}")
 
     _FRAMEWORKS_IMPORTED = True
 
