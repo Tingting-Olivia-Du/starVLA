@@ -97,13 +97,23 @@ the current *world state*, (b) the unit stored in *geometric memory*, and (c) th
 Files live under `starVLA/starVLA/model/`. Reuse verdicts come from the MemoryVLA /
 beta-vla / starVLA code audits.
 
-### 4.1 VGGT world-state encoder — `modules/encoders/vggt_world_state.py` (NEW, ~150 LOC)
-- Wraps **frozen** `facebook/VGGT-1B`, returns **layer-4** aggregator latent `z_t`
-  (`d=1024`, `N=5+N_p`, drop the 5 special tokens → `[B, N_p, 1024]`), matching VGGT-World.
-- Adapt from `beta-vla/src/betavla/models/vggt_backbone.py` (its `_VGGTAggregatorBackbone`
-  already loads the aggregator and runs the alternating-attention blocks).
-- `requires_grad_(False)`; runs under `torch.no_grad()` in forward.
-- **Reuse:** liftable with adaptation (beta-vla, same repo).
+### 4.1 VGGT world-state encoder — vendored from VGGT-World (REVISED)
+- **Use the real VGGT-World implementation, not a hand-written re-encoder.** The reference
+  is at `/workspace/tingting/vggt-world/vggt/world_model/` (Meta research license; allows
+  derivative works + research use, requires acknowledgement in publications).
+- Vendor that whole `world_model/` package into starVLA at
+  `starVLA/model/modules/vggt_world/` (verbatim, headers tagged + provenance noted).
+- The world state is `FrozenVGGTBackbone.encode_states(images) -> GeometryState`
+  (`backbone.py:84`). It runs VGGT **layers 0-5** and returns a **dual-stream**
+  `GeometryState` (`frame_tokens` + `global_tokens`, each `[B, frames, tokens, 1024]`,
+  plus `patch_grid`, `frame_ids`, `image_hw`). This supersedes the earlier single-`z`
+  assumption — the real world state is two token streams, decoder-compatible.
+- For downstream consumers (memory, condition assembler) flatten via
+  `GeometryState.flatten_streams() -> [B, frames*2*tokens, 1024]` (`state.py:55`).
+- **Verified:** the installed `vggt` package exposes everything `backbone.py` imports
+  (`slice_expand_and_flatten`, `Aggregator._process_frame_attention/_process_global_attention`),
+  so the vendored package runs without patching VGGT itself.
+- **Reuse:** directly liftable (vendor verbatim); only a thin starVLA-facing adapter is new.
 
 ### 4.2 Dual memory bank — `modules/memory/dual_memory_bank.py` (NEW, ~250 LOC, core research)
 - Two instances of MemoryVLA's bank (lifted, MIT):
@@ -118,19 +128,33 @@ beta-vla / starVLA code audits.
 - **Reuse:** `CogMemBank` / `PerMemBank` from `MemoryVLA/vla/memory_vla.py:158-358` —
   directly liftable, change dims. `BottleneckSE` (`:105-137`) rewritten for VGGT feature shape.
 
-### 4.3 3D imagination — `modules/imagination/geo_flow_imaginer.py` (NEW, ~300 LOC, core research)
-- Flow transformer operating in the VGGT `z` latent space, trained with **flow matching**
-  and **z-prediction parameterization** (predict clean target latent, not velocity — higher
-  SNR in 1024-D, per VGGT-World §z-prediction).
-- Input: current + retrieved geometric memory; output: imagined future chunk
-  `ẑ_{t+1..t+m}` used as the 3D visual subgoal condition.
-- **Two-stage curriculum** (VGGT-World): stage 1 teacher-forced on GT future VGGT latents;
-  stage 2 partially-denoised rollout to close train/test gap. (Stage 2 may be deferred to a
-  later ablation — see §6 phasing.)
-- **Supervision:** GT future `z` obtained by running frozen VGGT on the future frames of the
-  same trajectory (no extra labels needed; LIBERO trajectories are available offline).
-- **Reuse:** reference-only (reimplement from VGGT-World description; flow-matching utilities
-  may be borrowed from starVLA's existing flow-matching head code).
+### 4.3 3D imagination — vendored `VGGTWorldModel` (REVISED)
+- **Use the real VGGT-World flow transformer, not a hand-written toy.** It lives in the same
+  vendored package (§4.1): `vggt_world/model.py:VGGTWorldModel`,
+  `flow_model.py:TemporalFlowTransformer`, `losses.py:WorldModelLoss`, `solver.py`,
+  `scheduler.py`. Faithful to the paper because it *is* the paper's code.
+- Real mechanism (now confirmed by reading the code):
+  - **Architecture:** FLUX-style `DoubleStreamBlock` + `SingleStreamBlock` with **3-axis RoPE**
+    (`EmbedND3D`, axes `[16,24,24]` over frame / patch-h / patch-w), not a generic encoder.
+  - **z-prediction:** the flow net predicts the clean target; sampling converts to velocity via
+    `solver.clean_to_velocity` inside an Euler rollout.
+  - **stage-1 loss:** SNR-weighted MSE `1/(1-τ)²` (`losses.py:_latent_loss`); **stage-2:** plain
+    MSE on the flow-forced target.
+  - **two-stage flow-forcing curriculum:** `_stage1_forward` (teacher-forced) and
+    `_stage2_forward` (partial Euler rollout + `mix_lambda` linear ramp), gated by `where`
+    vs `stage2_start` (`model.py:159-242`).
+  - **autoregressive forecast:** chunk-wise sliding-window `_forecast` with `context_size`/
+    `chunk_size` (`model.py:256`).
+  - **bonus:** `decode_during_train` can add geometry-decode supervision (depth/point/camera)
+    on top of the latent loss (`backbone.decode_geometry`), exactly as the paper does.
+- **Geo-MemoryVLA wiring:** a thin adapter calls `VGGTWorldModel` to produce imagined future
+  `GeometryState` (the 3D visual subgoal), then `flatten_streams()` into the condition. The
+  imaginer's own loss (latent + optional decode) is added to the action loss with a scale.
+- **Supervision (free):** GT future state = run `FrozenVGGTBackbone.encode_states` on the
+  trajectory's future frames; LIBERO trajectories are available offline. The model's
+  `forward(images, ...)` already encodes the full window and slices context/target internally.
+- **Reuse:** directly liftable (vendor verbatim); only the starVLA-facing adapter + the
+  future-frame batching are new.
 
 ### 4.4 Semantic / language stream — Qwen3-VL (REUSE, no change)
 - Use starVLA's `_QWen3_VL_Interface` (`modules/vlm/QWen3.py`) unchanged.
@@ -221,21 +245,34 @@ Each phase is independently trainable and gives a measurable ablation row.
 
 | Type | Files | Est. LOC |
 | --- | --- | --- |
-| NEW research modules | `dual_memory_bank.py`, `geo_flow_imaginer.py` | ~550 (the real research code) |
-| NEW wiring | `vggt_world_state.py`, `GeoMemoryVLA.py` (self-registers via decorator — no `__init__.py` edit), `config_geomemvla.yaml` | ~460 (mostly copied skeletons) |
+| VENDORED verbatim (VGGT-World) | `modules/vggt_world/*` (backbone, flow_model, model, losses, solver, scheduler, state, blocks, rope3d, time_embed, metrics) | ~1577 (copied, not written) |
+| NEW research module | `dual_memory_bank.py` (+ `memory_bank.py`) | ~300 (the real new research code) |
+| NEW wiring/adapters | `vggt_world_adapter.py`, `condition_assembler.py`, `GeoMemoryVLA.py` (self-registers — no `__init__.py` edit), `geo_memoryvla_libero.yaml` | ~500 (mostly skeletons/glue) |
 | REUSE unchanged | Qwen3-VL wrapper, GR00T head, starVLA train loop / eval / ckpt | 0 |
-| Lifted from MemoryVLA (MIT) | memory bank, ToMe, BottleneckSE | adapt only |
+| Lifted from MemoryVLA (MIT) | memory bank, ToMe, gate fusion | adapt only |
 
-**Rating:** wiring is small-to-medium (GR00T head + Qwen3-VL wrapper + training loop reused
-verbatim); research code is medium-to-large (dual memory + flow imagination are the two new
-modules requiring ablation). Heavier than a static VGGT+GR00T model, but a clear paper story.
+**Rating:** vendoring VGGT-World removes the biggest research risk (the imaginer is now the
+paper's own code, not a re-derivation). Genuinely new code shrinks to the dual memory bank +
+the glue that turns `GeometryState` into the GR00T condition. Heavier than a static VGGT+GR00T
+model, but a faithful, citable paper story.
+
+> **Correction note (2026-06-29):** an earlier draft planned to *re-implement* the imaginer
+> from the paper abstract. After locating the real VGGT-World code at
+> `/workspace/tingting/vggt-world`, the design switched to **vendoring it verbatim** — the
+> hand-written `GeoFlowImaginer` toy is dropped. This was prompted by the user correctly
+> challenging whether a from-abstract reimplementation would match the paper. It would not have.
 
 ---
 
 ## 9. Provenance & licenses
 
-- **MemoryVLA** — MIT. Memory bank / ToMe / BottleneckSE are liftable; cite in headers.
-- **VGGT** (`facebook/VGGT-1B`) — used as a frozen pretrained encoder via the `vggt` package
-  (already installed, v0.0.1).
-- **VGGT-World** (arXiv 2603.12655) — imagination module reimplemented from the paper.
+- **MemoryVLA** — MIT. Memory bank / ToMe / gate fusion are liftable; cite in headers.
+- **VGGT** (`facebook/VGGT-1B`) — frozen pretrained encoder via the `vggt` package (installed,
+  v0.0.1). **License caveat:** the original `VGGT-1B` checkpoint is **non-commercial**; a
+  separate `VGGT-1B-Commercial` checkpoint exists for commercial use. Fine for research; note
+  before any productization.
+- **VGGT-World** (arXiv 2603.12655) — implementation **vendored verbatim** from
+  `/workspace/tingting/vggt-world/vggt/world_model/` under the **Meta research license**
+  (permits derivative works + research use; **requires acknowledgement in publications**).
+  Verified that the installed `vggt` package satisfies its internal imports.
 - **starVLA** — host framework (MIT); GR00T head, Qwen3-VL wrapper, trainer reused.
