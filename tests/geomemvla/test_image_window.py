@@ -4,6 +4,8 @@
 # docs/superpowers/specs/2026-06-29-geo-memoryvla-image-window-design.md
 import importlib
 
+import pytest
+
 
 def _load_libero_cfg():
     mod = importlib.import_module("examples.LIBERO.train_files.data_registry.data_config")
@@ -107,9 +109,6 @@ def test_episode_boundary_clamp_at_tail():
     step_indices = np.minimum(np.maximum(np.array(delta) + base_index, 0), traj_len - 1)
     # future frames clamp to last index (3), no bleed past episode end.
     assert step_indices.tolist() == [2, 3, 3, 3, 3]
-
-
-import pytest
 
 
 def test_imagination_default_horizon_is_two():

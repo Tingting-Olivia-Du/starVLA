@@ -230,10 +230,10 @@ class GeoMemoryVLA(baseframework):
         imag = None
         imag_loss = torch.zeros((), device=device)
         if self.use_imag:
-            # The vendored world model consumes a multi-frame image window. When the
-            # dataloader provides one ("image_window" key: context+chunk frames), pass it;
-            # otherwise fall back to the current views (degenerate single-step, Task 5 note).
-            # `where` drives the stage-1/stage-2 flow-forcing curriculum.
+            # [Geo-MemoryVLA] The vendored world model needs a multi-frame window. The
+            # dataloader must supply "image_window" (context+chunk+1 frames) when imagination
+            # is on; _build_image_window raises ValueError if it is missing (no silent
+            # single-frame degeneration). `where` drives stage-1/stage-2 flow-forcing.
             window = self._build_image_window(examples, device=device)
             imag = self.imaginer.imagine_tokens(window, forecast_frames=self.imag_horizon)
             imag_loss = self.imaginer.training_loss(window, where=float(kwargs.get("where", 0.0)))
