@@ -363,9 +363,16 @@ class VLAMTrainer(TrainerUtils):
         # accumulates and `step()` only updates on the engine's own boundary.
         if hasattr(self.model, "is_gradient_accumulation_boundary") and hasattr(self.model, "backward"):
             with torch.autocast("cuda", dtype=torch.bfloat16):
-                output_dict = self.model.forward(batch_vla)
+                # [Geo-MemoryVLA] M2: thread training progress into `where` (Stage-2 curriculum).
+                where = self.completed_steps / max(1, self.config.trainer.max_train_steps)
+                output_dict = self.model.forward(batch_vla, where=where)
                 action_loss = output_dict["action_loss"]
-            self.model.backward(action_loss)
+                # [Geo-MemoryVLA] M1: include imagination_loss in the backward total.
+                vla_total_loss = action_loss
+                imagination_loss = output_dict.get("imagination_loss", None)
+                if imagination_loss is not None:
+                    vla_total_loss = vla_total_loss + imagination_loss
+            self.model.backward(vla_total_loss)
 
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
                 unwrapped = self.accelerator.unwrap_model(self.model)
@@ -391,9 +398,15 @@ class VLAMTrainer(TrainerUtils):
             self.optimizer.zero_grad()
 
             with torch.autocast("cuda", dtype=torch.bfloat16):
-                output_dict = self.model.forward(batch_vla)
+                # [Geo-MemoryVLA] M2: thread training progress into `where` (Stage-2 curriculum).
+                where = self.completed_steps / max(1, self.config.trainer.max_train_steps)
+                output_dict = self.model.forward(batch_vla, where=where)
                 action_loss = output_dict["action_loss"]
+                # [Geo-MemoryVLA] M1: include imagination_loss in the backward total.
                 total_loss = action_loss
+                imagination_loss = output_dict.get("imagination_loss", None)
+                if imagination_loss is not None:
+                    total_loss = total_loss + imagination_loss
             self.accelerator.backward(total_loss)
 
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16):

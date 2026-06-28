@@ -402,9 +402,19 @@ class VLATrainer(TrainerUtils):
             self.optimizer.zero_grad()
 
             with torch.autocast("cuda", dtype=torch.bfloat16):
-                output_dict = self.model.forward(batch_vla)
+                # [Geo-MemoryVLA] M2: thread training progress into `where` so the imagination
+                # world model's Stage-2 flow-forcing curriculum can engage (where>=stage2_start).
+                # Harmless for frameworks that ignore **kwargs.
+                where = self.completed_steps / max(1, self.config.trainer.max_train_steps)
+                output_dict = self.model.forward(batch_vla, where=where)
                 action_loss = output_dict["action_loss"]
+                # [Geo-MemoryVLA] M1: include imagination_loss (and any future aux loss) in the
+                # backward total. The trainer previously backprop'd only action_loss, leaving the
+                # imagination flow transformer (its only trainable part) at random init.
                 total_loss = action_loss
+                imagination_loss = output_dict.get("imagination_loss", None)
+                if imagination_loss is not None:
+                    total_loss = total_loss + imagination_loss
 
             self.accelerator.backward(total_loss)
 
@@ -420,9 +430,13 @@ class VLATrainer(TrainerUtils):
             if self.accelerator.sync_gradients:
                 self.lr_scheduler.step()
 
-        return {
+        step_losses = {
             "action_dit_loss": action_loss.item(),
         }
+        # [Geo-MemoryVLA] M1: surface imagination_loss in metrics when present.
+        if imagination_loss is not None:
+            step_losses["imagination_loss"] = imagination_loss.item()
+        return step_losses
 
     def _finalize_training(self):
         """Training end processing."""
