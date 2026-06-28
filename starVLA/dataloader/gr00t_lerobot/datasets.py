@@ -554,13 +554,9 @@ def calculate_rel_action_statistics(
         }
     return rel_stats
 
-class ModalityConfig(BaseModel):
-    """Configuration for a modality."""
-
-    delta_indices: list[int]
-    """Delta indices to sample relative to the current index. The returned data will correspond to the original data at a sampled base index + delta indices."""
-    modality_keys: list[str]
-    """The keys to load for the modality in the dataset."""
+# ModalityConfig is defined in modality_config.py to keep it importable
+# without the full datasets.py import chain (albumentations, pytorch3d, …).
+from starVLA.dataloader.gr00t_lerobot.modality_config import ModalityConfig  # noqa: F401,E402
 
 
 class LeRobotSingleDataset(Dataset):

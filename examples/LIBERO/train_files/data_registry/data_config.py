@@ -1,9 +1,10 @@
 """LIBERO benchmark — data config, embodiment tags, and mixtures."""
 
-from starVLA.dataloader.gr00t_lerobot.datasets import ModalityConfig
+from starVLA.dataloader.gr00t_lerobot.modality_config import ModalityConfig
 from starVLA.dataloader.gr00t_lerobot.transform.base import ComposedModalityTransform
-from starVLA.dataloader.gr00t_lerobot.transform.state_action import StateActionToTensor, StateActionTransform
 from starVLA.dataloader.gr00t_lerobot.embodiment_tags import EmbodimentTag
+# StateActionToTensor / StateActionTransform are imported lazily inside transform()
+# to avoid pulling in pytorch3d at config-load time (unit-test friendly).
 
 
 # ---------------------------------------------------------------------------
@@ -39,15 +40,41 @@ class Libero4in1DataConfig:
     action_indices = list(range(8))
     state_indices = [0]
 
+    # [Geo-MemoryVLA] image_window: multi-frame window for VGGTWorldModel imagination.
+    # Defaults follow VGGT-World (arXiv 2603.12655): context k=2, chunk m=2 -> 5 frames.
+    # Window length = context + chunk + 1 (Stage-2's required_frames). See spec.
+    enable_image_window = True
+    image_window_context = 2
+    image_window_chunk = 2
+
+    @property
+    def image_window_indices(self):
+        # range(-(ctx-1), chunk+2): 1 past + current + chunk+1 future = ctx+chunk+1 frames.
+        return list(range(-(self.image_window_context - 1), self.image_window_chunk + 2))
+
     def modality_config(self):
-        return {
+        configs = {
             "video": ModalityConfig(delta_indices=self.observation_indices, modality_keys=self.video_keys),
-            "state": ModalityConfig(delta_indices=self.state_indices, modality_keys=self.state_keys), # igore state modality for now since some datasets don't have state and we want to be able to use them, can add back later if needed
+            "state": ModalityConfig(delta_indices=self.state_indices, modality_keys=self.state_keys),  # ignore state modality for now since some datasets don't have state and we want to be able to use them, can add back later if needed
             "action": ModalityConfig(delta_indices=self.action_indices, modality_keys=self.action_keys),
             "language": ModalityConfig(delta_indices=self.observation_indices, modality_keys=self.language_keys),
         }
+        # [Geo-MemoryVLA] Declare the window modality only when enabled (imagination on).
+        # Omitting it => no extra frame reads and no image_window key in the sample.
+        if self.enable_image_window:
+            configs["image_window"] = ModalityConfig(
+                delta_indices=self.image_window_indices,
+                modality_keys=self.video_keys,
+            )
+        return configs
 
     def transform(self):
+        # Lazy import: pytorch3d (required by StateActionTransform) is only
+        # available in full training envs, not in lightweight test runners.
+        from starVLA.dataloader.gr00t_lerobot.transform.state_action import (  # noqa: PLC0415
+            StateActionToTensor,
+            StateActionTransform,
+        )
         return ComposedModalityTransform(transforms=[
             StateActionToTensor(apply_to=self.action_keys),
             StateActionTransform(
