@@ -36,3 +36,52 @@ def test_modality_config_omits_window_when_disabled():
     assert "image_window" not in mc
     # observation path untouched
     assert mc["video"].delta_indices == [0]
+
+
+import numpy as np
+from PIL import Image
+
+
+class _FakeDataset:
+    # Minimal stand-in exposing just what _pack_sample needs.
+    def __init__(self, with_window):
+        from starVLA.dataloader.gr00t_lerobot import datasets as ds
+        self._pack_sample = ds.LeRobotSingleDataset._pack_sample.__get__(self)
+        self.tag = "libero_franka"
+        self.data_cfg = {}
+        self.modality_keys = {
+            "video": ["video.primary_image", "video.wrist_image"],
+            "language": ["annotation.human.action.task_description"],
+            "action": ["action.x"],
+        }
+        if with_window:
+            self.modality_keys["image_window"] = ["video.primary_image", "video.wrist_image"]
+
+
+def _fake_data(F):
+    # (F, H, W, C) uint8 per video key; action/lang minimal.
+    frame = lambda v: np.full((F, 32, 32, 3), v, dtype=np.uint8)
+    return {
+        "video.primary_image": frame(10),
+        "video.wrist_image": frame(20),
+        "annotation.human.action.task_description": ["pick up the cup"],
+        "action.x": np.zeros((8, 1), dtype=np.float32),
+    }
+
+
+def test_pack_sample_emits_window_when_modality_present():
+    dset = _FakeDataset(with_window=True)
+    sample = dset._pack_sample(_fake_data(F=5))
+    assert "image_window" in sample
+    assert len(sample["image_window"]) == 5            # F frames
+    assert len(sample["image_window"][0]) == 2         # num_views
+    assert isinstance(sample["image_window"][0][0], Image.Image)
+    assert sample["image_window"][0][0].size == (224, 224)
+    # current frame still present and single-frame-per-view
+    assert len(sample["image"]) == 2
+
+
+def test_pack_sample_omits_window_when_modality_absent():
+    dset = _FakeDataset(with_window=False)
+    sample = dset._pack_sample(_fake_data(F=1))
+    assert "image_window" not in sample

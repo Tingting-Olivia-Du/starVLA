@@ -1402,6 +1402,22 @@ class LeRobotSingleDataset(Dataset):
             "robot_tag": self.tag
         }
 
+        # [Geo-MemoryVLA] Emit a multi-frame window for VGGTWorldModel imagination when the
+        # image_window modality is declared (DataConfig.enable_image_window). Shape:
+        # List[F][num_views] of PIL 224x224, matching the per-view format of sample["image"].
+        # See docs/superpowers/specs/2026-06-29-geo-memoryvla-image-window-design.md
+        if "image_window" in self.modality_keys:
+            window_keys = self.modality_keys["image_window"]
+            num_frames = data[window_keys[0]].shape[0]
+            image_window = []
+            for f in range(num_frames):
+                frame_views = []
+                for video_key in window_keys:
+                    img = Image.fromarray(data[video_key][f]).resize((224, 224))
+                    frame_views.append(img)
+                image_window.append(frame_views)
+            sample["image_window"] = image_window
+
         if self.data_cfg is not None and self.data_cfg.get("include_state", False) not in ["False", False]:
             state = []
             for state_key in self.modality_keys.get("state", []):
