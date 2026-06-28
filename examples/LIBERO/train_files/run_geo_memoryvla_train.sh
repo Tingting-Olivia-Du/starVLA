@@ -33,8 +33,10 @@ cp "$0" "${output_dir}/" 2>/dev/null || true
 
 num_processes=${NUM_PROCESSES:-$(echo "${CUDA_VISIBLE_DEVICES}" | tr ',' '\n' | wc -l)}
 
-# WANDB: set WANDB_MODE=disabled to skip, or export WANDB_API_KEY + entity/project.
-export WANDB_MODE="${WANDB_MODE:-disabled}"
+# WANDB: enabled by default (entity tingtingdu). Export WANDB_MODE=disabled to skip;
+# make sure you're logged in (`wandb login`) or export WANDB_API_KEY.
+export WANDB_MODE="${WANDB_MODE:-online}"
+wandb_entity="${WANDB_ENTITY:-tingtingdu}"
 
 accelerate launch \
   --config_file starVLA/config/deepseeds/deepspeed_zero2.yaml \
@@ -57,4 +59,4 @@ accelerate launch \
   --run_root_dir "${run_root_dir}" \
   --run_id "${run_id}" \
   --wandb_project starVLA_GeoMemoryVLA \
-  --wandb_entity your_name
+  --wandb_entity "${wandb_entity}"
