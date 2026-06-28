@@ -279,4 +279,4 @@ imagination.enabled = False
 
 ### Commit hash
 
-(see git log below)
+`b45bf5f` — `[Geo-MemoryVLA] Final review: default imagination off + Phase-C warn-once guard; GPU-convention comment`
