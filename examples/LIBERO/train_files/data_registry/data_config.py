@@ -1,10 +1,8 @@
 """LIBERO benchmark — data config, embodiment tags, and mixtures."""
 
-from starVLA.dataloader.gr00t_lerobot.modality_config import ModalityConfig
+from starVLA.dataloader.gr00t_lerobot.datasets import ModalityConfig
 from starVLA.dataloader.gr00t_lerobot.transform.base import ComposedModalityTransform
 from starVLA.dataloader.gr00t_lerobot.embodiment_tags import EmbodimentTag
-# StateActionToTensor / StateActionTransform are imported lazily inside transform()
-# to avoid pulling in pytorch3d at config-load time (unit-test friendly).
 
 
 # ---------------------------------------------------------------------------
