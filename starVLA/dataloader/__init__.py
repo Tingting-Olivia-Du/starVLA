@@ -49,8 +49,11 @@ def build_dataloader(cfg, dataset_py="lerobot_datasets_oxe"): # TODO now here on
             for _dc in ROBOT_TYPE_CONFIG_MAP.values():
                 if hasattr(_dc, "enable_image_window"):
                     _dc.enable_image_window = _enable_win
-        except Exception:
-            pass  # non-LIBERO runs / missing keys: leave DataConfig defaults
+        except (ImportError, AttributeError, KeyError) as _e:
+            # [Geo-MemoryVLA] non-LIBERO runs / missing keys: leave DataConfig defaults.
+            # Narrowed (not bare Exception) so real mistakes surface instead of silently
+            # mis-gating the image_window modality.
+            logger.warning(f"[Geo-MemoryVLA] image_window gate skipped: {_e}")
 
         vla_dataset = get_vla_dataset(
             data_cfg=vla_dataset_cfg,
