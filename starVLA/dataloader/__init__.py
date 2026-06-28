@@ -39,6 +39,19 @@ def build_dataloader(cfg, dataset_py="lerobot_datasets_oxe"): # TODO now here on
         from starVLA.dataloader.lerobot_datasets import get_vla_dataset, collate_fn
         vla_dataset_cfg = cfg.datasets.vla_data
 
+        # [Geo-MemoryVLA] Gate the image_window modality: declare it only when BOTH the
+        # dataloader switch and imagination are on. ROBOT_TYPE_CONFIG_MAP shares the
+        # DataConfig instance, so setting the attr here reaches modality_config().
+        try:
+            from examples.LIBERO.train_files.data_registry.data_config import ROBOT_TYPE_CONFIG_MAP
+            _enable_win = bool(cfg.datasets.vla_data.get("enable_image_window", True)) and \
+                          bool(cfg.framework.imagination.get("enabled", False))
+            for _dc in ROBOT_TYPE_CONFIG_MAP.values():
+                if hasattr(_dc, "enable_image_window"):
+                    _dc.enable_image_window = _enable_win
+        except Exception:
+            pass  # non-LIBERO runs / missing keys: leave DataConfig defaults
+
         vla_dataset = get_vla_dataset(
             data_cfg=vla_dataset_cfg,
             balance_dataset_weights=vla_dataset_cfg.get("balance_dataset_weights", False),

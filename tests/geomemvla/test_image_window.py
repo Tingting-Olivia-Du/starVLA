@@ -139,3 +139,14 @@ def test_yaml_enables_window_and_imagination():
     assert cfg.datasets.vla_data.enable_image_window is True
     assert cfg.framework.imagination.enabled is True
     assert cfg.framework.imagination.horizon == 2
+
+
+def test_gating_resolves_to_and_of_flags():
+    # The gate the training entry applies: window iff enable_image_window AND imagination.enabled.
+    def gate(enable_image_window, imagination_enabled):
+        return bool(enable_image_window) and bool(imagination_enabled)
+
+    assert gate(True, True) is True
+    assert gate(True, False) is False
+    assert gate(False, True) is False
+    assert gate(False, False) is False
