@@ -107,3 +107,27 @@ def test_episode_boundary_clamp_at_tail():
     step_indices = np.minimum(np.maximum(np.array(delta) + base_index, 0), traj_len - 1)
     # future frames clamp to last index (3), no bleed past episode end.
     assert step_indices.tolist() == [2, 3, 3, 3, 3]
+
+
+import pytest
+
+
+def test_imagination_default_horizon_is_two():
+    from starVLA.model.framework.VLM4A.GeoMemoryVLA import GeoMemoryVLADefaultConfig
+    cfg = GeoMemoryVLADefaultConfig()
+    assert cfg.imagination["horizon"] == 2          # paper m=2
+
+
+def test_build_image_window_raises_when_imag_on_and_window_missing():
+    # Construct a lightweight object exposing just _build_image_window + the flags it reads,
+    # without building the full (GPU) model.
+    from starVLA.model.framework.VLM4A.GeoMemoryVLA import GeoMemoryVLA
+    from PIL import Image
+    import numpy as np
+
+    obj = GeoMemoryVLA.__new__(GeoMemoryVLA)      # bypass __init__ (no model load)
+    obj.use_imag = True
+    img = Image.fromarray(np.zeros((8, 8, 3), dtype=np.uint8))
+    examples = [{"image": [img, img]}]            # no "image_window"
+    with pytest.raises(ValueError, match="image_window"):
+        obj._build_image_window(examples, device="cpu")

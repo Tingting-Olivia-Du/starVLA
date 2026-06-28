@@ -43,7 +43,9 @@ class GeoMemoryVLADefaultConfig:
         "fusion_type": "gate", "consolidate_type": "tome",
     })
     imagination: dict = field(default_factory=lambda: {
-        "enabled": True, "horizon": 4, "depth": 4, "steps": 4, "loss_scale": 0.5,
+        # [Geo-MemoryVLA] horizon=2 (paper m=2, VGGT-World arXiv 2603.12655). Window =
+        # context+horizon+1 = 5 frames. See image-window design spec.
+        "enabled": True, "horizon": 2, "depth": 4, "steps": 4, "loss_scale": 0.5,
     })
     action_model: dict = field(default_factory=lambda: {
         "action_model_type": "DiT-B", "action_hidden_dim": 1024, "hidden_size": 1024,
@@ -107,6 +109,11 @@ class GeoMemoryVLA(baseframework):
                 chunk_size=int(fw.imagination["horizon"]),
                 context_size=int(fw.imagination.get("context_size", 2)),
             )
+            # [Geo-MemoryVLA] Window must satisfy VGGTWorldModel Stage-2: context+chunk+1.
+            ctx = int(fw.imagination.get("context_size", 2))
+            chunk = int(fw.imagination["horizon"])
+            self._imag_window_len = ctx + chunk + 1
+            # (the dataloader derives the same length from the DataConfig; this is a guard.)
         self.imag_loss_scale = float(fw.imagination["loss_scale"])
         self.imag_horizon = int(fw.imagination["horizon"])
 
@@ -171,32 +178,29 @@ class GeoMemoryVLA(baseframework):
         return torch.stack(batch, dim=0).to(device)
 
     def _build_image_window(self, examples, device):
-        # Multi-frame window for the world model. Prefer an explicit "image_window"
-        # (List[frames][views] of PIL) if the dataloader supplies it; else degenerate
-        # to the current single frame's views (Task 5 note / Phase-C follow-up).
+        # [Geo-MemoryVLA] Multi-frame window for the world model. imagination ON requires the
+        # dataloader to supply "image_window" (see image-window design spec). A missing window
+        # while imagination is on is a hard error — silently degenerating to a single frame
+        # would look like imagination is training when it is not.
         import torchvision.transforms.functional as TF
         windows = []
         for e in examples:
             if "image_window" not in e:
-                # [Geo-MemoryVLA] Phase-C guard: imagination needs multi-frame windows. If the
-                # dataloader did not supply "image_window", we degenerate to the single current
-                # frame — warn once so this can't pass silently (see spec §7 Phase-C follow-up).
-                if not getattr(self, "_warned_single_frame_window", False):
-                    warnings.warn(
-                        "GeoMemoryVLA: imagination enabled but no 'image_window' in batch; "
-                        "degenerating to single-frame window. Training may fail (vendored "
-                        "VGGTWorldModel requires >= context_size+chunk_size frames). See spec §7.",
-                        stacklevel=2,
+                if getattr(self, "use_imag", False):
+                    raise ValueError(
+                        "GeoMemoryVLA: imagination enabled but batch has no 'image_window'. "
+                        "Enable the image_window dataloader modality "
+                        "(datasets.vla_data.enable_image_window=true) — see "
+                        "docs/superpowers/specs/2026-06-29-geo-memoryvla-image-window-design.md"
                     )
-                    self._warned_single_frame_window = True
             frames = e.get("image_window", [e["image"]])
             frame_tensors = []
             for views in frames:
                 vs = [TF.to_tensor(v.convert("RGB")) for v in views]
                 frame_tensors.append(torch.stack(vs, dim=0))   # [num_views, 3, H, W]
-            # Flatten (frames, views) into the world model's frame axis.
             windows.append(torch.cat(frame_tensors, dim=0))
-        return torch.stack(windows, dim=0).to(device)          # [B, F*views, 3, H, W]
+        out = torch.stack(windows, dim=0).to(device)           # [B, F*views, 3, H, W]
+        return out
 
     def _assemble(self, geo, sem, m_geo, m_sem, imag):
         streams = {}
