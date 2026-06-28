@@ -85,3 +85,25 @@ def test_pack_sample_omits_window_when_modality_absent():
     dset = _FakeDataset(with_window=False)
     sample = dset._pack_sample(_fake_data(F=1))
     assert "image_window" not in sample
+
+
+def test_episode_boundary_clamp_keeps_past_in_episode():
+    # Mirrors get_video's clamp: step_indices = delta + base, then clamp to [0, traj_len-1].
+    delta = [-1, 0, 1, 2, 3]          # the image_window indices
+    traj_len = 50
+    base_index = 0                    # episode head
+    step_indices = np.array(delta) + base_index
+    step_indices = np.maximum(step_indices, 0)
+    step_indices = np.minimum(step_indices, traj_len - 1)
+    # past frame (-1) must clamp to 0, never to a prior episode's last frame.
+    assert step_indices.tolist() == [0, 0, 1, 2, 3]
+    assert step_indices.min() >= 0
+
+
+def test_episode_boundary_clamp_at_tail():
+    delta = [-1, 0, 1, 2, 3]
+    traj_len = 4                      # tiny episode; future frames overflow
+    base_index = 3                    # last frame
+    step_indices = np.minimum(np.maximum(np.array(delta) + base_index, 0), traj_len - 1)
+    # future frames clamp to last index (3), no bleed past episode end.
+    assert step_indices.tolist() == [2, 3, 3, 3, 3]
