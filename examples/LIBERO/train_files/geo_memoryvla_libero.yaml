@@ -27,13 +27,11 @@ framework:
     fusion_type: gate
     consolidate_type: tome
   imagination:
-    # [Geo-MemoryVLA] OFF by default: the vendored VGGTWorldModel needs multi-frame
-    # image windows (>= context_size+chunk_size frames). The LIBERO dataloader yields
-    # single frames today, so enabling this requires the Phase-C "image_window" dataloader
-    # work (see docs/superpowers/specs/2026-06-29-geo-memoryvla-design.md §7). Flipping
-    # this to true WITHOUT that work will fail/degenerate.
-    enabled: false
-    horizon: 4
+    # [Geo-MemoryVLA] ON: the image_window dataloader modality now supplies multi-frame
+    # windows (context+chunk+1 = 5 frames). Paper (arXiv 2603.12655) defaults: context k=2,
+    # chunk m=2. See docs/superpowers/specs/2026-06-29-geo-memoryvla-image-window-design.md
+    enabled: true
+    horizon: 2
     depth: 4
     steps: 4
     loss_scale: 0.5
@@ -61,6 +59,8 @@ datasets:
     data_mix: libero_all
     action_type: delta_qpos
     sequential_step_sampling: True   # [Geo-MemoryVLA] needed so memory sees ordered episodes
+    # [Geo-MemoryVLA] declare the image_window modality (gated with imagination.enabled).
+    enable_image_window: true
     per_device_batch_size: 8
     load_all_data_for_training: true
     video_backend: torchvision_av

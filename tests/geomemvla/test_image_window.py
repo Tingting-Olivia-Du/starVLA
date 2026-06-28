@@ -130,3 +130,12 @@ def test_build_image_window_raises_when_imag_on_and_window_missing():
     examples = [{"image": [img, img]}]            # no "image_window"
     with pytest.raises(ValueError, match="image_window"):
         obj._build_image_window(examples, device="cpu")
+
+
+def test_yaml_enables_window_and_imagination():
+    from omegaconf import OmegaConf
+
+    cfg = OmegaConf.load("examples/LIBERO/train_files/geo_memoryvla_libero.yaml")
+    assert cfg.datasets.vla_data.enable_image_window is True
+    assert cfg.framework.imagination.enabled is True
+    assert cfg.framework.imagination.horizon == 2
