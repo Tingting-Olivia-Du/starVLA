@@ -113,6 +113,14 @@ class GeoMemoryVLA(baseframework):
             stream_dims["sem"] = sem_dim
             if self.use_memory:
                 stream_dims["m_sem"] = sem_dim
+        # [Geo-MemoryVLA] ConditionAssembler crashes on an all-None/empty stream set
+        # (torch.cat of empty). A contradictory ablation (e.g. world_state.enabled=False
+        # with stream="geo_only") would yield no active streams — fail fast with a clear msg.
+        if not stream_dims:
+            raise ValueError(
+                "GeoMemoryVLA: no active condition streams — check framework.world_state.enabled "
+                "and framework.world_state.stream (need at least one of geo/sem active)."
+            )
         self.assembler = ConditionAssembler(stream_dims=stream_dims, out_dim=cond_dim)
 
         self.action_model = get_action_model(config=self.config)

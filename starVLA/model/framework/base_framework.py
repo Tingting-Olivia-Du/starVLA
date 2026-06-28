@@ -43,12 +43,12 @@ def _auto_import_framework_modules() -> None:
                     continue
                 try:
                     importlib.import_module(f"starVLA.model.framework.{module_name}.{sub_name}")
-                except Exception as e:
+                except ImportError as e:  # [Geo-MemoryVLA] tolerate peer modules whose heavy deps are absent in this env (e.g. QwenAdapter.py needs Qwen3VLForConditionalGeneration)
                     logger.warning(f"Could not auto-import framework module {module_name}.{sub_name}: {e}")
         else:
             try:
                 importlib.import_module(f"starVLA.model.framework.{module_name}")
-            except Exception as e:
+            except ImportError as e:  # [Geo-MemoryVLA] tolerate peer modules whose heavy deps are absent in this env (e.g. QwenAdapter.py needs Qwen3VLForConditionalGeneration)
                 logger.warning(f"Could not auto-import framework module {module_name}: {e}")
 
     _FRAMEWORKS_IMPORTED = True
