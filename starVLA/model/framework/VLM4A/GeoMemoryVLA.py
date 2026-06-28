@@ -66,11 +66,20 @@ class GeoMemoryVLA(baseframework):
         self.config = merge_framework_config(GeoMemoryVLADefaultConfig, config)
         fw = self.config.framework
 
-        self.qwen_vl_interface = get_vlm_model(config=self.config)
-        sem_dim = int(self.qwen_vl_interface.model.config.hidden_size)
-
+        # [Geo-MemoryVLA] Determine which streams are active BEFORE constructing Qwen3-VL,
+        # so that geo_only ablations can run in environments where Qwen3VLForConditionalGeneration
+        # is absent (e.g. transformers < 4.54). Qwen3-VL is only constructed when use_sem=True.
         self.use_geo = fw.world_state["enabled"] and fw.world_state["stream"] in ("geo_only", "dual")
         self.use_sem = fw.world_state["stream"] in ("sem_only", "dual")
+
+        if self.use_sem:
+            self.qwen_vl_interface = get_vlm_model(config=self.config)
+            sem_dim = int(self.qwen_vl_interface.model.config.hidden_size)
+        else:
+            # [Geo-MemoryVLA] geo_only ablation: no VLM. Read sem_dim from config as a
+            # fallback so ConditionAssembler / DualMemoryBank dim wiring still works if
+            # sem streams are later enabled without changing this branch.
+            sem_dim = int(fw.qwenvl.get("vl_hidden_dim", 2048))
         if self.use_geo:
             # Vendored frozen VGGT-World backbone (Task 1 adapter).
             self.world_state = WorldStateAdapter(pretrained_vggt_repo=fw.world_state["model_name"])
@@ -129,14 +138,24 @@ class GeoMemoryVLA(baseframework):
     # --- helpers -------------------------------------------------------------
     def _encode(self, examples):
         images = [e["image"] for e in examples]
-        instructions = [e["lang"] for e in examples]
-        qwen_inputs = self.qwen_vl_interface.build_qwenvl_inputs(images=images, instructions=instructions)
-        with torch.autocast("cuda", dtype=torch.bfloat16):
-            out = self.qwen_vl_interface(**qwen_inputs, output_hidden_states=True, return_dict=True)
-        sem = out.hidden_states[-1] if self.use_sem else None  # [B, L, H]
+        # [Geo-MemoryVLA] geo_only ablation: skip VLM forward entirely when use_sem=False
+        # (Qwen3-VL may not be installed in this env). Device is inferred from the VGGT
+        # backbone parameters so the geo path still runs on the correct device.
+        if self.use_sem:
+            instructions = [e["lang"] for e in examples]
+            qwen_inputs = self.qwen_vl_interface.build_qwenvl_inputs(images=images, instructions=instructions)
+            with torch.autocast("cuda", dtype=torch.bfloat16):
+                out = self.qwen_vl_interface(**qwen_inputs, output_hidden_states=True, return_dict=True)
+            sem = out.hidden_states[-1]  # [B, L, H]
+            vggt_device = sem.device
+        else:
+            sem = None
+            # [Geo-MemoryVLA] Infer device from the VGGT backbone when VLM is absent.
+            vggt_device = next(self.world_state.parameters()).device
+
         geo = None
         if self.use_geo:
-            pix = self._build_vggt_pixels(images, device=out.hidden_states[-1].device)
+            pix = self._build_vggt_pixels(images, device=vggt_device)
             state = self.world_state.encode(pix)            # GeometryState (frozen)
             geo = self.world_state.flatten(state)            # [B, F*2*tokens, 1024]
         return geo, sem
