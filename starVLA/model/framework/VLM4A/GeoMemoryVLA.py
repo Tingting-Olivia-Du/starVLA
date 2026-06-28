@@ -6,6 +6,7 @@
 # docs/superpowers/specs/2026-06-29-geo-memoryvla-design.md
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass, field
 from typing import List, Optional
 
@@ -176,6 +177,18 @@ class GeoMemoryVLA(baseframework):
         import torchvision.transforms.functional as TF
         windows = []
         for e in examples:
+            if "image_window" not in e:
+                # [Geo-MemoryVLA] Phase-C guard: imagination needs multi-frame windows. If the
+                # dataloader did not supply "image_window", we degenerate to the single current
+                # frame — warn once so this can't pass silently (see spec §7 Phase-C follow-up).
+                if not getattr(self, "_warned_single_frame_window", False):
+                    warnings.warn(
+                        "GeoMemoryVLA: imagination enabled but no 'image_window' in batch; "
+                        "degenerating to single-frame window. Training may fail (vendored "
+                        "VGGTWorldModel requires >= context_size+chunk_size frames). See spec §7.",
+                        stacklevel=2,
+                    )
+                    self._warned_single_frame_window = True
             frames = e.get("image_window", [e["image"]])
             frame_tensors = []
             for views in frames:

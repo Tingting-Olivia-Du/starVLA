@@ -1,11 +1,12 @@
 # tests/geomemvla/test_smoke_gpu.py
 # [Geo-MemoryVLA] End-to-end GPU smoke test: geo_only stream (no Qwen3-VL).
 # Verifies real VGGT-1B weights + GR00T action head produce a finite loss and
-# correct predict_action output shape. Marked @pytest.mark.slow; needs GPU 1.
+# correct predict_action output shape. Marked @pytest.mark.slow; needs a free GPU.
+# Project convention: use GPUs 4-7 for test/smoke runs (0-3 reserved for others).
 #
 # Run:
 #   cd /workspace/tingting/starVLA
-#   CUDA_VISIBLE_DEVICES=1 PYTHONPATH=/workspace/tingting/starVLA \
+#   CUDA_VISIBLE_DEVICES=4 PYTHONPATH=/workspace/tingting/starVLA \
 #     HF_HUB_ENABLE_HF_TRANSFER=0 \
 #     python -m pytest tests/geomemvla/test_smoke_gpu.py -v -m slow -s
 import numpy as np

@@ -27,7 +27,12 @@ framework:
     fusion_type: gate
     consolidate_type: tome
   imagination:
-    enabled: true
+    # [Geo-MemoryVLA] OFF by default: the vendored VGGTWorldModel needs multi-frame
+    # image windows (>= context_size+chunk_size frames). The LIBERO dataloader yields
+    # single frames today, so enabling this requires the Phase-C "image_window" dataloader
+    # work (see docs/superpowers/specs/2026-06-29-geo-memoryvla-design.md §7). Flipping
+    # this to true WITHOUT that work will fail/degenerate.
+    enabled: false
     horizon: 4
     depth: 4
     steps: 4
