@@ -292,6 +292,11 @@ class GeoMemoryVLA(baseframework):
         timesteps = [e.get("timestep", 0) for e in examples]
         m_geo = m_sem = None
         if self.use_memory:
+            # [Geo-MemoryVLA] B4: clear stale cross-rollout memory at an episode boundary so eval
+            # rollouts don't bleed into each other. Trigger on an explicit reset kwarg or the first
+            # step of a new episode (timestep == 0). Without this, memory.reset() was never called.
+            if bool(kwargs.get("reset", False)) or any(int(t) == 0 for t in timesteps):
+                self.memory.reset()
             m_geo, m_sem = self.memory.process(geo, sem, episode_ids, timesteps)
         imag = None
         if self.use_imag:

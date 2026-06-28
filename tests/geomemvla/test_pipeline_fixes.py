@@ -206,3 +206,24 @@ def test_sequential_sampling_yields_contiguous_steps():
     base_idxs = [b for (_, _, b) in steps]
     assert traj_ids[0] == traj_ids[1] == traj_ids[2] == traj_ids[3], "sequential: same trajectory"
     assert base_idxs == [0, 1, 2, 3], f"sequential: contiguous steps, got {base_idxs}"
+
+
+# ----------------------------------------------------------------------------
+# B4 — memory resets at an episode boundary (timestep==0) during inference.
+# ----------------------------------------------------------------------------
+def test_predict_action_source_resets_memory_on_new_episode():
+    src = pathlib.Path("starVLA/model/framework/VLM4A/GeoMemoryVLA.py").read_text()
+    ast.parse(src)
+    # predict_action must call memory.reset() at an episode boundary.
+    assert "self.memory.reset()" in src
+    assert 'kwargs.get("reset"' in src or "timestep" in src
+
+
+def test_dual_memory_reset_clears_bank():
+    from starVLA.model.modules.memory.dual_memory_bank import DualMemoryBank
+
+    dual = DualMemoryBank(geo_dim=8, sem_dim=8, mem_length=16)
+    dual.process(torch.randn(1, 2, 8), torch.randn(1, 2, 8), episode_ids=[3], timesteps=[0])
+    assert len(dual.geo.bank) > 0 and len(dual.sem.bank) > 0
+    dual.reset()
+    assert len(dual.geo.bank) == 0 and len(dual.sem.bank) == 0  # cleared
