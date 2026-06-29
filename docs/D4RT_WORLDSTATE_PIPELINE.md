@@ -93,7 +93,8 @@ All new code is greppable with the marker `[D4RT-WorldState]`. Vendored code not
 | `starVLA/model/modules/geomem/world_state_factory.py` | **NEW** | `build_world_state(fw)` / `build_imaginer(fw, ws)` — dispatch on `world_state.backbone`. |
 | `starVLA/model/framework/VLM4A/GeoMemoryVLA.py` | **MODIFIED** | Factory switch; `_build_d4rt_window` (agentview-only temporal window); backbone-aware routing in `_encode`, `forward`, `predict_action`. |
 | `examples/LIBERO/train_files/config_geomemvla_d4rt.yaml` | **NEW** | D4RT-arm config (controlled copy of the geomemvla config; only `world_state`/`imagination` differ). |
-| `tools/d4rt_forecast_probe.py` | **NEW** | Phase D-PROBE: offline forecasting probe (`build_forecast_query`, `probe_extrapolation`). |
+| `tools/d4rt_forecast_probe.py` | **NEW** | Phase D-PROBE primitives (`build_forecast_query`, `probe_extrapolation`). |
+| `tools/d4rt_probe_libero.py` | **NEW** | D-PROBE driver on REAL LIBERO clips (extrap MAE vs static/recon baselines + gate verdict). |
 | `tests/geomemvla/test_d4rt_*.py` | **NEW** | 6 unit test files (loader, adapters, probe, window, config, factory) + 1 slow GPU smoke. |
 
 ### Two design invariants baked into the code
@@ -225,11 +226,34 @@ The eval path is **unchanged** — `predict_action` is backbone-agnostic (it rou
 `action_loss` + `imagination_loss` + `predict_action (1,8,7)`. 61 unit tests pass; no regression
 to the VGGT-World path.
 
-**Deferred (per plan — do before the D2/D3 training runs):**
-1. **D-PROBE manual gate** — measure real extrapolation MAE before trusting `tracks`.
-2. **`tracks` supervision** — the loss is a **no-op when `gt_future_xyz` is absent**; wire the
-   full-clip GT-future positions from the dataloader. End-effector pixel selection is currently a
-   uniform grid (`track_grid`), refine to the actual gripper pixel.
-3. **Reproduction-encoder caveat (R5)** — Open-D4RT weights are unofficial/WIP; a weak encoder
-   bounds the comparison. The D-PROBE transitively measures this.
+### D-PROBE GATE RESULT — 2026-06-30 (FAILED → ship `latent`-only)
+
+Ran `tools/d4rt_probe_libero.py` on real LIBERO `libero_object` agentview clips (20 subsampled +
+15 contiguous, horizon 2 and 8), GPU 4, frozen 14 GB ckpt:
+
+| Metric | Value | Meaning |
+| --- | --- | --- |
+| D4RT extrapolation MAE | **0.033** | prefix-only forecast vs full-clip GT (horizon 8) |
+| Static (no-motion) MAE | 0.008 | "points don't move" baseline |
+| GT motion magnitude | 0.008 | how far points actually move over the horizon |
+| Motion-skill score | **−3.1** | D4RT extrapolation is ~4× WORSE than static |
+
+**Verdict:** the **frozen** D4RT decoder does **NOT** extrapolate `t_tgt > t`. Root cause: D4RT is
+a **bidirectional full-clip reconstructor** — feeding it a causal *prefix* is out-of-distribution,
+so the prefix-encode memory is unstable even at *observed* frames (recon-gap ≈ extrap MAE). The
+decoder's beyond-prefix queries return noise, not motion.
+
+**Consequence:** `subgoal_type` is locked to **`latent`** in the config. The `latent` head predicts
+a future-state token block from the full-window memory and does **not** rely on decoder
+extrapolation, so it is unaffected by this result and remains the apples-to-apples comparison vs
+VGGT-World. `tracks` is **shelved** until/unless the 144M decoder is **fine-tuned to be causal**
+(mask future frames, supervise prefix→future) — a research task, not a config flip.
+
+**Still-open follow-ups:**
+1. **(Optional) Causal decoder fine-tune** — the only path to revive `tracks`. Freeze encoder,
+   train decoder on prefix→future with masked frames. Only worth it if `latent` underperforms.
+2. **Reproduction-encoder caveat (R5)** — Open-D4RT weights are unofficial/WIP. The recon-gap
+   instability may be partly reproduction quality; a paper-grade D4RT could differ. Bounds the
+   comparison; note in any writeup.
+3. **`latent` is fully ready** — proceed directly to the D1 / D3 comparison training runs.
 ```

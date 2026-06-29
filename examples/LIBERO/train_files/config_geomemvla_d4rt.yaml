@@ -34,9 +34,15 @@ framework:
     consolidate_type: tome
   imagination:
     # [D4RT-WorldState] D4RT forecaster. subgoal_type: latent (parity with VGGT-World z) or
-    # tracks (D4RT-native future 3D point positions). Gate on Phase D-PROBE before tracks.
+    # tracks (D4RT-native future 3D point positions).
+    # *** D-PROBE GATE RESULT (2026-06-30, libero_object, 20+15 clips): FAILED. ***
+    # Frozen D4RT decoder does NOT extrapolate t_tgt>t: extrap MAE 0.033 vs static 0.008
+    # vs GT-motion 0.008 (motion-skill -3.1). Root cause: D4RT is a BIDIRECTIONAL full-clip
+    # reconstructor — a causal prefix is OOD, so prefix-encode memory is unstable even at
+    # observed frames. => ship subgoal_type=latent (does NOT depend on decoder extrapolation).
+    # `tracks` requires decoder fine-tuning to become causal first (see spec §4 / D-PROBE).
     enabled: true
-    subgoal_type: latent
+    subgoal_type: latent       # locked to latent until tracks decoder fine-tuning lands
     horizon: 2
     loss_scale: 0.5
   action_model:
