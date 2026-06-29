@@ -64,7 +64,7 @@ the Open-D4RT repo, not assumed.
 | `t_cam` | selects *which frame's pose* is the reference coord system, NOT which camera | paper Fig.2 | Pin `t_cam = t` (current frame). See Risk 2. |
 | Temporal patch | 2×16×16 (needs a real temporal clip) | paper §arch | Adapter feeds a 32/48-frame sliding window. See Risk 3. |
 | Forecasting | **NOT in the model**: `t_tgt ∈ {1…T}`, observed frames only | paper, verified ×2 | The one real research bet; de-risked by a standalone probe first. See §4 + Risk 1. |
-| Checkpoints | Open-D4RT, **Apache-2.0**, HF `Lijiaxin0111/OpenD4RT` (32CLIP + 48CLIP variants) | repo | Vendored verbatim. Unofficial, "not endorsed by original authors" — disclosed. |
+| Checkpoints | Open-D4RT, **Apache-2.0**, HF `Lijiaxin0111/OpenD4RT/checkpoints` — two variants (27.9 GB total): `OpenD4RT_32CLIP_9Dataset_NoAUG` and `OpenD4RT_48CLIP_9Mix_NoCropAUG` (newer; the one we target) | repo / HF | Vendored verbatim. **Unofficial *reproduction* weights**, "not endorsed by original authors"; README does NOT report a reproduction-vs-paper accuracy gap and full train/eval code is "planned for release" (WIP). Quality risk, not blocking — see R5. Disclosed. |
 
 **Contrast with VGGT-World (verified in the vendored code):** VGGT's backbone has a single
 `frames` axis (`vggt_world/backbone.py:43`) that is **view-agnostic** — used as *views* in the
@@ -169,6 +169,7 @@ B3 interleaved pseudo-video — breaks D4RT's monocular-motion assumption.)
 | **R2 — Camera coords / `t_cam`** | **Pin `t_cam = t`** (current frame) as a hard adapter invariant, not a config knob. Future positions expressed in the frame the policy acts from; LIBERO agentview is ~fixed → stable metric frame. |
 | **R3 — VideoMAE temporal patch needs a clip** | Adapter feeds a **sliding 32/48-frame agentview window** (matching the ckpt), built from frames the dataloader already loads; pad/stride at episode start; stride chosen so the window spans a meaningful motion span at LIBERO control freq. Contained entirely in `D4RTWorldStateAdapter`; shared dataloader unchanged. |
 | **R4 — Compute (big backbones)** | Comparison runs are **A xor B**, never both in one model → peak memory ≈ existing design (D4RT-1B replaces VGGT-1B). Frozen + bf16; only 144M decoder + projections get gradients. Smoke on **GPUs 4–7**. |
+| **R5 — Reproduction-grade encoder** (Open-D4RT ≠ original D4RT) | The HF weights are an **unofficial reproduction**, WIP, with **no published accuracy gap vs the paper**. A weaker encoder → weaker forecasts → smaller eval gains, but does NOT change the architecture, API, or forecasting surgery. **Quality risk, not blocking.** Phase D-PROBE transitively tests encoder quality (you cannot extrapolate well from a bad `F`), so it surfaces before VLA compute. If the probe is poor, the finding itself is reportable ("comparison bounded by reproduction encoder quality") and a paper-grade D4RT can be dropped in later as an encoder swap. |
 
 ---
 
@@ -238,3 +239,7 @@ Reuse the existing Geo-MemoryVLA switches (`memory.enabled`, `imagination.enable
    full-clip ground-truth future positions/latents (disk vs compute, mirrors companion spec task 3).
 5. **`F` token shape into memory/condition.** Confirm D4RT `F` flattens to `[B, N, C]` compatibly
    with `DualMemoryBank` dims (add a projection if `C` ≠ memory dim).
+6. **Pick the checkpoint + sanity-check reproduction quality (R5).** Default to
+   `OpenD4RT_48CLIP_9Mix_NoCropAUG`. Before the probe, run the repo's own WorldTrack eval on a
+   small set to confirm the weights load and produce sane 3D tracks — establishes the encoder
+   isn't broken independent of the forecasting question.
