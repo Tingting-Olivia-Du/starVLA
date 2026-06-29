@@ -43,11 +43,23 @@ num_processes=${NUM_PROCESSES:-$(echo "${CUDA_VISIBLE_DEVICES}" | tr ',' '\n' | 
 export WANDB_MODE="${WANDB_MODE:-online}"
 wandb_entity="${WANDB_ENTITY:-tingtingdu06-uw-madison}"
 
-# --main_process_port 0 => auto-pick a free port (avoids the 29500 conflict with other jobs).
+# [D4RT-WorldState] Pick an EXPLICIT free master port. NOTE: accelerate treats
+# `--main_process_port 0` as the literal port 0 (NOT "auto-pick"), which makes every rank
+# hang forever in _create_c10d_store (NCCL rendezvous). The default 29500 is also occupied
+# by other jobs here. So choose a concrete free port (override with MAIN_PROCESS_PORT).
+main_port="${MAIN_PROCESS_PORT:-29555}"
+if ss -tln 2>/dev/null | grep -q ":${main_port} "; then
+  # fall back: scan upward for the first free port so two D4RT runs don't collide.
+  for p in $(seq 29556 29600); do
+    ss -tln 2>/dev/null | grep -q ":${p} " || { main_port=$p; break; }
+  done
+fi
+echo "[D4RT-WorldState] using master port ${main_port}"
+
 accelerate launch \
   --config_file starVLA/config/deepseeds/deepspeed_zero2.yaml \
   --num_processes "${num_processes}" \
-  --main_process_port 0 \
+  --main_process_port "${main_port}" \
   starVLA/training/train_starvla.py \
   --config_yaml "${config_yaml}" \
   --framework.name GeoMemoryVLA \
