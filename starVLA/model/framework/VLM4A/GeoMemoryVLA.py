@@ -64,6 +64,28 @@ class GeoMemoryVLADefaultConfig:
     })
 
 
+# [D4RT-WorldState] Agentview-only temporal window for the monocular D4RT stream (spec §5,
+# B1). The frame axis is TIME; view 0 (agentview) only — wrist reaches the policy via the
+# Qwen3-VL/GR00T path, not the geometric stream. Uses image_window when present (a real
+# temporal series), else replicate-pads the current agentview frame to win_len. Range [0,1],
+# resized to 256x256 (D4RT input). Module-level so it is unit-testable without the model.
+def _build_d4rt_window(examples, device, win_len: int = 48):
+    import torchvision.transforms.functional as TF
+    windows = []
+    for e in examples:
+        imgs = e["image"] if isinstance(e["image"], (list, tuple)) else [e["image"]]
+        agent = imgs[0].convert("RGB")                       # view 0 = agentview (B1)
+        frames = e.get("image_window")
+        if frames:                                           # List[F][views] -> agentview series
+            series = [(f[0] if isinstance(f, (list, tuple)) else f).convert("RGB") for f in frames]
+        else:
+            series = [agent]
+        series = (series + [series[-1]] * win_len)[:win_len]  # replicate-pad to win_len
+        ten = torch.stack([TF.resize(TF.to_tensor(im), [256, 256]) for im in series], dim=0)
+        windows.append(ten)
+    return torch.stack(windows, dim=0).to(device)             # [B, win_len, 3, 256, 256]
+
+
 @FRAMEWORK_REGISTRY.register("GeoMemoryVLA")
 class GeoMemoryVLA(baseframework):
     def __init__(self, config: Optional[dict] = None, **kwargs) -> None:
@@ -91,6 +113,10 @@ class GeoMemoryVLA(baseframework):
             # (VGGT=1024, D4RT=1280) without any other change here.
             self.world_state = build_world_state(fw)
             geo_dim = self.world_state.hidden_size
+            # [D4RT-WorldState] remember which backbone so _encode routes the right input
+            # builder (VGGT: multi-view pixels; D4RT: agentview temporal window).
+            self._backbone = fw.world_state.get("backbone", "vggt_world")
+            self._d4rt_win_len = int(fw.world_state.get("clip_frames", 48))
         else:
             geo_dim = sem_dim
 
@@ -175,9 +201,14 @@ class GeoMemoryVLA(baseframework):
 
         geo = None
         if self.use_geo:
-            pix = self._build_vggt_pixels(images, device=vggt_device)
-            state = self.world_state.encode(pix)            # GeometryState (frozen)
-            geo = self.world_state.flatten(state)            # [B, F*2*tokens, 1024]
+            if getattr(self, "_backbone", "vggt_world") == "d4rt":
+                # [D4RT-WorldState] agentview-only temporal window -> D4RT memory [B,N,C].
+                pix = _build_d4rt_window(examples, device=vggt_device, win_len=self._d4rt_win_len)
+                pix = self._cast_to_vggt_dtype(pix)         # match frozen backbone dtype
+            else:
+                pix = self._build_vggt_pixels(images, device=vggt_device)
+            state = self.world_state.encode(pix)            # GeometryState | D4RTState (frozen)
+            geo = self.world_state.flatten(state)            # [B, N, C]
         return geo, sem, sem_cog
 
     def _pool_cog_token(self, sem, attention_mask):
