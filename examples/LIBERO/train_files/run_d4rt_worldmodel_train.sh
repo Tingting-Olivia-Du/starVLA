@@ -61,7 +61,7 @@ fi
 echo "[D4RT-WorldState] using master port ${main_port}"
 
 accelerate launch \
-  --config_file starVLA/config/deepseeds/deepspeed_zero2.yaml \
+  --config_file starVLA/config/deepseeds/deepspeed_zero2_d4rt.yaml \
   --num_processes "${num_processes}" \
   --main_process_port "${main_port}" \
   starVLA/training/train_starvla.py \
