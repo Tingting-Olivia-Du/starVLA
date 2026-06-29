@@ -269,3 +269,40 @@ def test_build_vggt_pixels_casts_to_backbone_dtype():
     img = Image.fromarray(np.zeros((8, 8, 3), dtype=np.uint8))
     pix = obj._build_vggt_pixels([[img, img]], device="cpu")
     assert pix.dtype == torch.bfloat16, f"pix must match backbone dtype, got {pix.dtype}"
+
+
+# ----------------------------------------------------------------------------
+# VARLEN — semantic stream (Qwen3-VL hidden_states) has VARIABLE token length
+# (different task instructions => different L). The lifted MemoryVLA ToMe bank
+# assumed fixed-size entries -> crash: "size of tensor a (151) must match b (152)".
+# Fix: pool sem to a single cognitive token (MemoryVLA's original design) before memory.
+# ----------------------------------------------------------------------------
+def test_tome_crashes_on_variable_length_entries():
+    # Reproduce the exact failure: memory bank fed variable-length features triggers ToMe
+    # consolidation that averages two different-length entries -> RuntimeError.
+    from starVLA.model.modules.memory.memory_bank import MemoryBank
+
+    bank = MemoryBank(token_dim=8, mem_length=2, consolidate_type="tome")
+    # Same episode, but entries of DIFFERENT token counts (151 vs 152 analog).
+    bank.process_batch(torch.randn(1, 5, 8), episode_ids=[0], timesteps=[0])
+    bank.process_batch(torch.randn(1, 6, 8), episode_ids=[0], timesteps=[1])
+    with pytest.raises(RuntimeError, match="must match"):
+        # third insert exceeds mem_length=2 -> ToMe merges two different-length entries.
+        bank.process_batch(torch.randn(1, 5, 8), episode_ids=[0], timesteps=[2])
+
+
+def test_pool_cog_token_makes_sem_fixed_length():
+    # The fix helper: pool a variable-length [B,L,H] sem into a fixed [B,1,H] cognitive token
+    # using attention_mask to pick the last valid token (MemoryVLA's design).
+    from starVLA.model.framework.VLM4A.GeoMemoryVLA import GeoMemoryVLA
+
+    obj = GeoMemoryVLA.__new__(GeoMemoryVLA)
+    # two samples with different valid lengths (left-padded, Qwen default).
+    sem = torch.randn(2, 7, 4)
+    mask = torch.tensor([[0, 0, 1, 1, 1, 1, 1],   # last valid at idx 6
+                         [0, 0, 0, 0, 1, 1, 1]])   # last valid at idx 6 too (left pad)
+    cog = obj._pool_cog_token(sem, mask)
+    assert cog.shape == (2, 1, 4)  # fixed single token per sample
+    # it must equal the hidden state at the last valid position.
+    assert torch.allclose(cog[0, 0], sem[0, 6])
+    assert torch.allclose(cog[1, 0], sem[1, 6])

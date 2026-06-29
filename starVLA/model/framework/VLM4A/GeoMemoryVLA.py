@@ -149,13 +149,20 @@ class GeoMemoryVLA(baseframework):
         # [Geo-MemoryVLA] geo_only ablation: skip VLM forward entirely when use_sem=False
         # (Qwen3-VL may not be installed in this env). Device is inferred from the VGGT
         # backbone parameters so the geo path still runs on the correct device.
+        sem_cog = None
         if self.use_sem:
             instructions = [e["lang"] for e in examples]
             qwen_inputs = self.qwen_vl_interface.build_qwenvl_inputs(images=images, instructions=instructions)
             with torch.autocast("cuda", dtype=torch.bfloat16):
                 out = self.qwen_vl_interface(**qwen_inputs, output_hidden_states=True, return_dict=True)
-            sem = out.hidden_states[-1]  # [B, L, H]
+            sem = out.hidden_states[-1]  # [B, L, H]  (L varies with instruction length!)
             vggt_device = sem.device
+            # [Geo-MemoryVLA] Pool the VARIABLE-length sem into a fixed single cognitive token for
+            # MEMORY (the ToMe bank averages entries -> requires fixed size; different LIBERO task
+            # instructions give different L, which crashed ToMe with "size a != size b"). This is
+            # MemoryVLA's original design (last valid token via attention_mask). The FULL sem still
+            # goes to the condition assembler; only the memory entry is pooled.
+            sem_cog = self._pool_cog_token(sem, qwen_inputs.get("attention_mask", None))
         else:
             sem = None
             # [Geo-MemoryVLA] Infer device from the VGGT backbone when VLM is absent.
@@ -166,7 +173,17 @@ class GeoMemoryVLA(baseframework):
             pix = self._build_vggt_pixels(images, device=vggt_device)
             state = self.world_state.encode(pix)            # GeometryState (frozen)
             geo = self.world_state.flatten(state)            # [B, F*2*tokens, 1024]
-        return geo, sem
+        return geo, sem, sem_cog
+
+    def _pool_cog_token(self, sem, attention_mask):
+        # [Geo-MemoryVLA] [B, L, H] -> [B, 1, H]: the hidden state at the last VALID token
+        # (MemoryVLA's cognitive token). Uses attention_mask so it's correct under left/right pad.
+        if attention_mask is None:
+            return sem[:, -1:, :]
+        attention_mask = attention_mask.to(sem.device)
+        last_idx = attention_mask.long().cumsum(dim=1).argmax(dim=1)  # [B] last valid position
+        idx = last_idx[:, None, None].expand(-1, 1, sem.shape[-1])
+        return sem.gather(1, idx)  # [B, 1, H]
 
     def _build_vggt_pixels(self, images, device):
         # images: List[B][List[PIL]] -> [B, num_views, 3, H, W] in [0,1].
@@ -245,13 +262,15 @@ class GeoMemoryVLA(baseframework):
 
     # --- training ------------------------------------------------------------
     def forward(self, examples: List[dict] = None, **kwargs):
-        geo, sem = self._encode(examples)
+        geo, sem, sem_cog = self._encode(examples)
         episode_ids = [e.get("episode_id", 0) for e in examples]
         timesteps = [e.get("timestep", 0) for e in examples]
 
         m_geo = m_sem = None
         if self.use_memory:
-            m_geo, m_sem = self.memory.process(geo, sem, episode_ids, timesteps)
+            # [Geo-MemoryVLA] memory stores the POOLED cog token (fixed size), not the full
+            # variable-length sem — see _pool_cog_token / the ToMe varlen crash fix.
+            m_geo, m_sem = self.memory.process(geo, sem_cog, episode_ids, timesteps)
 
         device = (sem if sem is not None else geo).device
         imag = None
@@ -298,7 +317,7 @@ class GeoMemoryVLA(baseframework):
             for e in examples:
                 e["image"] = resize_images(e["image"], target_size=train_obs)
 
-        geo, sem = self._encode(examples)
+        geo, sem, sem_cog = self._encode(examples)
         episode_ids = [e.get("episode_id", 0) for e in examples]
         timesteps = [e.get("timestep", 0) for e in examples]
         m_geo = m_sem = None
@@ -308,7 +327,8 @@ class GeoMemoryVLA(baseframework):
             # step of a new episode (timestep == 0). Without this, memory.reset() was never called.
             if bool(kwargs.get("reset", False)) or any(int(t) == 0 for t in timesteps):
                 self.memory.reset()
-            m_geo, m_sem = self.memory.process(geo, sem, episode_ids, timesteps)
+            # [Geo-MemoryVLA] pooled cog token into memory (fixed size) — see _pool_cog_token.
+            m_geo, m_sem = self.memory.process(geo, sem_cog, episode_ids, timesteps)
         imag = None
         if self.use_imag:
             # [Geo-MemoryVLA] S2: inference samples carry no image_window (no rolling buffer),
