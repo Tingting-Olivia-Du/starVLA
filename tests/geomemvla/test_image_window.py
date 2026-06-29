@@ -325,3 +325,36 @@ def test_real_getitem_image_window_no_collision():
     assert sample["image"][0] is not sample["image_window"][1][0], (
         "sample['image'][0] and image_window[1][0] must be independent objects"
     )
+
+
+@pytest.mark.skipif(not _libero_data_available(), reason="LIBERO parquet data not present")
+def test_real_getitem_d4rt_48frame_window():
+    """[D4RT-WorldState] With d4rt_window_frames=48, the dataloader must yield a 48-frame
+    contiguous past window (NOT VGGT's 5-frame context/chunk window), single-camera."""
+    import pathlib
+    from PIL import Image as PILImage
+    from starVLA.dataloader.gr00t_lerobot.datasets import LeRobotSingleDataset
+    from starVLA.dataloader.gr00t_lerobot.embodiment_tags import EmbodimentTag
+    from examples.LIBERO.train_files.data_registry.data_config import Libero4in1DataConfig
+
+    dataset_path = pathlib.Path(f"/workspace/tingting/starVLA/{_LIBERO_SPATIAL_PATH}")
+    data_cfg = Libero4in1DataConfig()
+    data_cfg.enable_image_window = True
+    data_cfg.d4rt_window_frames = 48                  # the D4RT override
+    assert data_cfg.image_window_indices == list(range(-47, 1))  # 48 past frames ending at current
+    mc = data_cfg.modality_config()
+
+    dset = LeRobotSingleDataset(
+        dataset_path=dataset_path, modality_configs=mc,
+        embodiment_tag=EmbodimentTag.FRANKA, video_backend="torchvision_av",
+        data_cfg={"lerobot_version": "v2.0", "video_backend": "torchvision_av"},
+    )
+    # Sample a frame with >=47 past frames available (episode 0 is long enough).
+    sample = dset[60]
+    assert "image_window" in sample
+    assert len(sample["image_window"]) == 48, (
+        f"expected 48-frame D4RT window, got {len(sample['image_window'])}"
+    )
+    for frame_views in sample["image_window"]:
+        assert len(frame_views) == 1                  # single-camera (primary only)
+        assert isinstance(frame_views[0], PILImage.Image)

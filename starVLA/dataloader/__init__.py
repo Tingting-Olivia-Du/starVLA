@@ -51,6 +51,12 @@ def build_dataloader(cfg, dataset_py="lerobot_datasets_oxe"): # TODO now here on
             _imag = cfg.framework.get("imagination", {}) if hasattr(cfg, "framework") else {}
             _ctx = int(_imag.get("context_size", 2))
             _chunk = int(_imag.get("horizon", 2))
+            # [D4RT-WorldState] D4RT wants a contiguous clip_frames-long PAST window (monocular),
+            # not VGGT's context/chunk window. When backbone==d4rt, set d4rt_window_frames so
+            # image_window_indices returns clip_frames past frames. VGGT path leaves it at 0.
+            _ws = cfg.framework.get("world_state", {}) if hasattr(cfg, "framework") else {}
+            _backbone = _ws.get("backbone", "vggt_world")
+            _d4rt_frames = int(_ws.get("clip_frames", 48)) if _backbone == "d4rt" else 0
             for _dc in ROBOT_TYPE_CONFIG_MAP.values():
                 if hasattr(_dc, "enable_image_window"):
                     _dc.enable_image_window = _enable_win
@@ -58,6 +64,8 @@ def build_dataloader(cfg, dataset_py="lerobot_datasets_oxe"): # TODO now here on
                         _dc.image_window_context = _ctx
                     if hasattr(_dc, "image_window_chunk"):
                         _dc.image_window_chunk = _chunk
+                    if hasattr(_dc, "d4rt_window_frames"):
+                        _dc.d4rt_window_frames = _d4rt_frames
         except (ImportError, AttributeError, KeyError) as _e:
             # [Geo-MemoryVLA] non-LIBERO runs / missing keys: leave DataConfig defaults.
             # Narrowed (not bare Exception) so real mistakes surface instead of silently

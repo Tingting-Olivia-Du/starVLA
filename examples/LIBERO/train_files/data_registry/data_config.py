@@ -46,9 +46,18 @@ class Libero4in1DataConfig:
     image_window_context = 2
     image_window_chunk = 2
 
+    # [D4RT-WorldState] D4RT is a monocular reconstructor over a contiguous clip — it wants a
+    # window of `d4rt_window_frames` PAST frames ending at the current frame (TIME axis, primary
+    # camera only, B1), NOT VGGT's context/chunk window. When >0, this overrides the index range.
+    # Set by the dataloader gate from framework.world_state.clip_frames when backbone==d4rt.
+    d4rt_window_frames = 0
+
     @property
     def image_window_indices(self):
-        # range(-(ctx-1), chunk+2): 1 past + current + chunk+1 future = ctx+chunk+1 frames.
+        if self.d4rt_window_frames and self.d4rt_window_frames > 0:
+            # D4RT: clip_frames contiguous past frames ending at current, e.g. 48 -> [-47..0].
+            return list(range(-(self.d4rt_window_frames - 1), 1))
+        # VGGT: range(-(ctx-1), chunk+2): 1 past + current + chunk+1 future = ctx+chunk+1 frames.
         return list(range(-(self.image_window_context - 1), self.image_window_chunk + 2))
 
     def modality_config(self):
