@@ -22,6 +22,12 @@ class WorldStateAdapter(nn.Module):
     def hidden_size(self) -> int:
         return self.HIDDEN_SIZE
 
+    @property
+    def dtype(self) -> torch.dtype:
+        # [Geo-MemoryVLA] Actual dtype of the (frozen) VGGT params. Pixel inputs must match it
+        # so the conv works without relying on an ambient autocast (eval/predict_action has none).
+        return next(self.backbone.parameters()).dtype
+
     def encode(self, images: torch.Tensor):
         """images: [B, num_views(*frames), 3, H, W] -> GeometryState (frozen)."""
         return self.backbone.encode_states(images)

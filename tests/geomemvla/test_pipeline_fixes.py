@@ -227,3 +227,45 @@ def test_dual_memory_reset_clears_bank():
     assert len(dual.geo.bank) > 0 and len(dual.sem.bank) > 0
     dual.reset()
     assert len(dual.geo.bank) == 0 and len(dual.sem.bank) == 0  # cleared
+
+
+# ----------------------------------------------------------------------------
+# DTYPE — VGGT pixel input must match the frozen backbone dtype (eval crashed:
+# "Input type (float) and bias type (c10::BFloat16) should be the same").
+# Training autocasts; predict_action (no autocast) did not -> crash at first eval.
+# ----------------------------------------------------------------------------
+def test_vggt_input_dtype_matches_bf16_conv_without_autocast():
+    # Reproduce the exact failure: a bf16 conv2d fed a float32 input, NO autocast.
+    conv = torch.nn.Conv2d(3, 4, kernel_size=2).to(torch.bfloat16)
+    x_f32 = torch.randn(1, 3, 8, 8)  # float32 (TF.to_tensor output)
+    with pytest.raises(RuntimeError, match="should be the same"):
+        conv(x_f32)
+    # The fix: cast input to the conv's (param) dtype first -> no crash.
+    target_dtype = next(conv.parameters()).dtype
+    out = conv(x_f32.to(target_dtype))
+    assert out.dtype == torch.bfloat16
+
+
+def test_build_vggt_pixels_casts_to_backbone_dtype():
+    # GeoMemoryVLA._build_vggt_pixels must cast pixels to the world_state backbone dtype
+    # so the frozen VGGT conv works without an ambient autocast (the eval path).
+    from starVLA.model.framework.VLM4A.GeoMemoryVLA import GeoMemoryVLA
+    from PIL import Image
+    import numpy as np
+
+    obj = GeoMemoryVLA.__new__(GeoMemoryVLA)
+
+    # Stand-in world_state whose "backbone dtype" is bf16.
+    class _FakeWS:
+        def __init__(self):
+            self._p = torch.nn.Parameter(torch.zeros(1, dtype=torch.bfloat16))
+        def parameters(self):
+            return iter([self._p])
+        @property
+        def dtype(self):
+            return self._p.dtype
+    obj.world_state = _FakeWS()
+
+    img = Image.fromarray(np.zeros((8, 8, 3), dtype=np.uint8))
+    pix = obj._build_vggt_pixels([[img, img]], device="cpu")
+    assert pix.dtype == torch.bfloat16, f"pix must match backbone dtype, got {pix.dtype}"

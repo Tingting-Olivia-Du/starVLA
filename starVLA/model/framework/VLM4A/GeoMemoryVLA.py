@@ -175,7 +175,17 @@ class GeoMemoryVLA(baseframework):
         for views in images:
             vs = [TF.to_tensor(v.convert("RGB")) for v in views]
             batch.append(torch.stack(vs, dim=0))
-        return torch.stack(batch, dim=0).to(device)
+        out = torch.stack(batch, dim=0).to(device)
+        # [Geo-MemoryVLA] cast to the frozen VGGT backbone dtype so the conv matches without an
+        # ambient autocast. Training autocasts forward(); predict_action (eval) does NOT, so a
+        # float32 input here crashed the first eval ("Input type (float) and bias type bf16").
+        return self._cast_to_vggt_dtype(out)
+
+    def _cast_to_vggt_dtype(self, x):
+        ws = getattr(self, "world_state", None)
+        if ws is not None and hasattr(ws, "dtype"):
+            return x.to(ws.dtype)
+        return x
 
     def _build_image_window(self, examples, device, allow_degenerate=False):
         # [Geo-MemoryVLA] Single-camera temporal window for the world model (S1: image_window is
@@ -216,7 +226,8 @@ class GeoMemoryVLA(baseframework):
                 f"image_window frame count {out.shape[1]} != expected {win_len} "
                 f"(single-view temporal window). See pipeline-fixes plan S1."
             )
-        return out
+        # [Geo-MemoryVLA] match frozen VGGT dtype (eval has no ambient autocast — see dtype fix).
+        return self._cast_to_vggt_dtype(out)
 
     def _assemble(self, geo, sem, m_geo, m_sem, imag):
         streams = {}
