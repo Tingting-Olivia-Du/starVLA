@@ -20,6 +20,8 @@ from starVLA.model.modules.action_model.GR00T_ActionHeader import get_action_mod
 from starVLA.model.modules.geomem.condition_assembler import ConditionAssembler
 from starVLA.model.modules.geomem.imagination_adapter import ImaginationAdapter
 from starVLA.model.modules.geomem.world_state_adapter import WorldStateAdapter
+# [D4RT-WorldState] factory selects vggt_world vs d4rt world-state + imaginer adapters.
+from starVLA.model.modules.geomem.world_state_factory import build_world_state, build_imaginer
 from starVLA.model.modules.memory.dual_memory_bank import DualMemoryBank
 from starVLA.model.modules.vlm import get_vlm_model
 from starVLA.model.tools import FRAMEWORK_REGISTRY
@@ -84,9 +86,11 @@ class GeoMemoryVLA(baseframework):
             # sem streams are later enabled without changing this branch.
             sem_dim = int(fw.qwenvl.get("vl_hidden_dim", 2048))
         if self.use_geo:
-            # Vendored frozen VGGT-World backbone (Task 1 adapter).
-            self.world_state = WorldStateAdapter(pretrained_vggt_repo=fw.world_state["model_name"])
-            geo_dim = self.world_state.hidden_size  # 1024
+            # [D4RT-WorldState] backbone-agnostic construction (vggt_world | d4rt). The
+            # adapter exposes .hidden_size at construction, so geo_dim adapts to the backbone
+            # (VGGT=1024, D4RT=1280) without any other change here.
+            self.world_state = build_world_state(fw)
+            geo_dim = self.world_state.hidden_size
         else:
             geo_dim = sem_dim
 
@@ -102,18 +106,19 @@ class GeoMemoryVLA(baseframework):
 
         self.use_imag = fw.imagination["enabled"] and self.use_geo
         if self.use_imag:
-            # Vendored VGGTWorldModel wrapper (Task 5 adapter). chunk/context drive the
-            # imagined horizon; it consumes multi-frame image windows (see Task 5 note).
-            self.imaginer = ImaginationAdapter(
-                pretrained_vggt_repo=fw.world_state["model_name"],
-                chunk_size=int(fw.imagination["horizon"]),
-                context_size=int(fw.imagination.get("context_size", 2)),
-            )
-            # [Geo-MemoryVLA] Window must satisfy VGGTWorldModel Stage-2: context+chunk+1.
-            ctx = int(fw.imagination.get("context_size", 2))
-            chunk = int(fw.imagination["horizon"])
-            self._imag_window_len = ctx + chunk + 1
-            # (the dataloader derives the same length from the DataConfig; this is a guard.)
+            # [D4RT-WorldState] backbone-agnostic imaginer (shares the frozen world_state).
+            self.imaginer = build_imaginer(fw, self.world_state)
+            backbone = fw.world_state.get("backbone", "vggt_world")
+            if backbone == "d4rt":
+                # [D4RT-WorldState] D4RT is monocular: the window is a clip_frames-long
+                # agentview temporal series (spec §5), not VGGT's context+chunk+1.
+                self._imag_window_len = int(fw.world_state.get("clip_frames", 48))
+            else:
+                # [Geo-MemoryVLA] Window must satisfy VGGTWorldModel Stage-2: context+chunk+1.
+                ctx = int(fw.imagination.get("context_size", 2))
+                chunk = int(fw.imagination["horizon"])
+                self._imag_window_len = ctx + chunk + 1
+                # (the dataloader derives the same length from the DataConfig; this is a guard.)
         self.imag_loss_scale = float(fw.imagination["loss_scale"])
         self.imag_horizon = int(fw.imagination["horizon"])
 
