@@ -160,8 +160,23 @@ class VLATrainer(TrainerUtils):
         return (
             self.config.datasets.vla_data.per_device_batch_size
             * self.accelerator.num_processes
-            * self.accelerator.gradient_accumulation_steps
+            * self._real_grad_accum()
         )
+
+    def _real_grad_accum(self):
+        # [D4RT-WorldState] accelerator.gradient_accumulation_steps does NOT reflect the value
+        # from an EXTERNAL DeepSpeed config file — it only mirrors the Accelerator(...) ctor arg
+        # (default 1). The DeepSpeed engine actually uses ds_config's value. Read the truth from
+        # the plugin's deepspeed_config so logs / total_batch_size are correct.
+        try:
+            ds = self.accelerator.state.deepspeed_plugin
+            if ds is not None:
+                ga = ds.deepspeed_config.get("gradient_accumulation_steps")
+                if isinstance(ga, int) and ga > 0:
+                    return ga
+        except (AttributeError, KeyError):
+            pass
+        return self.accelerator.gradient_accumulation_steps
 
     def _init_wandb(self):
         """Initialize Weights & Biases (best-effort; must not block training)."""
@@ -393,7 +408,7 @@ class VLATrainer(TrainerUtils):
             logger.info("***** Training Configuration *****")
             logger.info(f"  Total optimization steps = {self.config.trainer.max_train_steps}")
             logger.info(f"  Per device batch size = {self.config.datasets.vla_data.per_device_batch_size}")
-            logger.info(f"  Gradient accumulation steps = {self.accelerator.gradient_accumulation_steps}")
+            logger.info(f"  Gradient accumulation steps = {self._real_grad_accum()}")
             logger.info(f"  Total batch size = {self.total_batch_size}")
 
     def _train_step(self, batch_vla, batch_vlm=None):
