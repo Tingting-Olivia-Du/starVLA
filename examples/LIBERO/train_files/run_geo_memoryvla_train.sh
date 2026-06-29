@@ -13,19 +13,33 @@ export PYTHONPATH=/workspace/tingting/starVLA
 export NO_ALBUMENTATIONS_UPDATE=1
 export HF_HUB_ENABLE_HF_TRANSFER=0
 # GPUs 0-3 (current convention). Override by exporting CUDA_VISIBLE_DEVICES before calling.
-export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3}"
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-2,3}"
+
+# [Geo-MemoryVLA] /tmp is a SMALL 30G disk — temp files there cause ENOSPC mid-train.
+# Route ALL temp/scratch to the big rootfs disk (/, == /workspace, 5T). run_root_dir is already
+# under /workspace below. NOTE: HF cache already lives on the big disk at /root/angli/hf_cache
+# (VGGT-1B 5G is cached there) — point HF_HOME at it so we DON'T re-download. Only the pure
+# temp paths (tmpfile / triton / wandb scratch) are redirected to BIGTMP.
+BIGTMP=/workspace/tingting/.bigtmp
+mkdir -p "${BIGTMP}" "${BIGTMP}/torch" "${BIGTMP}/triton" "${BIGTMP}/wandb-cache"
+export TMPDIR="${BIGTMP}"
+export HF_HOME="${HF_HOME:-/root/angli/hf_cache}"   # existing big-disk cache (VGGT-1B already here)
+export TORCH_HOME="${BIGTMP}/torch"
+export TRITON_CACHE_DIR="${BIGTMP}/triton"
+export WANDB_DIR="${BIGTMP}"
+export WANDB_CACHE_DIR="${BIGTMP}/wandb-cache"
 
 cd /workspace/tingting/starVLA
 
 # ---- config ---------------------------------------------------------------
 config_yaml=./examples/LIBERO/train_files/geo_memoryvla_libero.yaml
 libero_data_root=playground/Datasets/LEROBOT_LIBERO_DATA
-data_mix=libero_goal              # start small (1 dataset); switch to libero_all for full
+data_mix=libero_all              # start small (1 dataset); switch to libero_all for full
 run_root_dir=./playground/Checkpoints
-run_id=geo_memoryvla_geoonly_$(date +%m%d_%H%M)   # NOTE: pass --run_id to override for resume
+run_id=geo_memoryvla_dual_$(date +%m%d_%H%M)   # NOTE: pass --run_id to override for resume
 
-# GEO-ONLY: no Qwen3-VL. stream=geo_only, imagination+memory ON.
-stream=geo_only
+# GEO-ONLY: no Qwen3-VL. stream=geo_only, imagination+memory ON. 2. sem_only 3. dual
+stream=dual
 
 output_dir=${run_root_dir}/${run_id}
 mkdir -p "${output_dir}"
@@ -36,7 +50,7 @@ num_processes=${NUM_PROCESSES:-$(echo "${CUDA_VISIBLE_DEVICES}" | tr ',' '\n' | 
 # WANDB: enabled by default (entity tingtingdu). Export WANDB_MODE=disabled to skip;
 # make sure you're logged in (`wandb login`) or export WANDB_API_KEY.
 export WANDB_MODE="${WANDB_MODE:-online}"
-wandb_entity="${WANDB_ENTITY:-tingtingdu}"
+wandb_entity="${WANDB_ENTITY:-tingtingdu06-uw-madison}"
 
 accelerate launch \
   --config_file starVLA/config/deepseeds/deepspeed_zero2.yaml \
@@ -49,7 +63,7 @@ accelerate launch \
   --framework.imagination.enabled True \
   --datasets.vla_data.data_root_dir "${libero_data_root}" \
   --datasets.vla_data.data_mix ${data_mix} \
-  --datasets.vla_data.per_device_batch_size 4 \
+  --datasets.vla_data.per_device_batch_size 8 \
   --datasets.vla_data.sequential_step_sampling True \
   --datasets.vla_data.enable_image_window True \
   --trainer.max_train_steps 80000 \
