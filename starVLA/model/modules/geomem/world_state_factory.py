@@ -28,7 +28,8 @@ def build_world_state(fw):
         return WorldStateAdapter(pretrained_vggt_repo=ws["model_name"])
     # d4rt
     return D4RTWorldStateAdapter(model_yaml=ws["d4rt_model_yaml"],
-                                 ckpt_path=ws.get("d4rt_ckpt_path"))
+                                 ckpt_path=ws.get("d4rt_ckpt_path"),
+                                 geo_pool_tokens=int(ws.get("geo_pool_tokens", 8)))
 
 
 def build_imaginer(fw, world_state):

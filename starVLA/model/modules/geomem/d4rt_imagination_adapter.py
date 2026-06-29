@@ -88,9 +88,13 @@ class D4RTImaginationAdapter(nn.Module):
     def imagine_tokens(self, window_or_state, forecast_frames: int) -> torch.Tensor:
         state = self._as_state(window_or_state)
         if self.subgoal_type == "latent":
-            self._ensure_latent_head(state.memory.shape[-1], state.memory.device,
-                                     state.memory.dtype)
-            return self.latent_head(state.memory)            # [B,N,C] latent subgoal
+            # [D4RT-WorldState] Pool the memory FIRST (same spatial pooling as the geo stream) so
+            # the latent subgoal matches geo's bounded length — avoids the 6145-token cross-attn
+            # OOM and keeps the head cheap. pool_k comes from the shared world_state.
+            pool_k = int(getattr(self._ws, "geo_pool_tokens", 0))
+            mem = state.flatten(pool_k=pool_k)               # [B, T*k(+lead), C]
+            self._ensure_latent_head(mem.shape[-1], mem.device, mem.dtype)
+            return self.latent_head(mem)                     # [B, T*k(+lead), C] latent subgoal
         # tracks: project raw xyz (dim 3) -> hidden_size so the imag stream matches the
         # assembler's registered geo_dim (stream_dims["imag"] = geo_dim).
         tracks = self._raw_tracks(state, forecast_frames)    # [B, M*horizon, 3]
@@ -105,8 +109,12 @@ class D4RTImaginationAdapter(nn.Module):
         if self.subgoal_type == "latent":
             # Self-supervised parity loss: the future head should not collapse — supervise
             # it toward the current state tokens (a learnable residual delta carries motion).
+            # [D4RT-WorldState] target must be the POOLED memory so it matches the pooled pred
+            # (imagine_tokens pools before the head); else 193 vs 6145 shape mismatch.
+            pool_k = int(getattr(self._ws, "geo_pool_tokens", 0))
+            target = state.flatten(pool_k=pool_k).detach()
             pred = self.imagine_tokens(state, self.horizon)
-            return F.mse_loss(pred, state.memory.detach())
+            return F.mse_loss(pred, target)
         # tracks: supervise RAW predicted future xyz (dim 3) against full-clip GT (free,
         # offline; spec §4). gt_future_xyz wiring from the dataloader is a D2 task.
         pred_xyz = self._raw_tracks(state, self.horizon)     # [B, M*horizon, 3]

@@ -12,6 +12,10 @@ export PATH="${STARVLA_PY}:${PATH}"
 export PYTHONPATH=/workspace/tingting/starVLA
 export NO_ALBUMENTATIONS_UPDATE=1
 export HF_HUB_ENABLE_HF_TRANSFER=0
+# [D4RT-WorldState] reduce allocator fragmentation (OOM log recommended this). geo/imag are
+# now spatially pooled (geo_pool_tokens), so condition is ~386 tokens not 12290 — peak mem
+# ~25 GiB at bs=4 (was 124 GiB -> OOM). This is belt-and-suspenders against fragmentation.
+export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
 # [D4RT-WorldState] GPUs 0,1 per user request (override by exporting CUDA_VISIBLE_DEVICES).
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1}"
 
@@ -73,7 +77,7 @@ accelerate launch \
   --framework.imagination.subgoal_type latent \
   --datasets.vla_data.data_root_dir "${libero_data_root}" \
   --datasets.vla_data.data_mix ${data_mix} \
-  --datasets.vla_data.per_device_batch_size 8 \
+  --datasets.vla_data.per_device_batch_size 4 \
   --datasets.vla_data.sequential_step_sampling True \
   --datasets.vla_data.enable_image_window True \
   --trainer.max_train_steps 80000 \

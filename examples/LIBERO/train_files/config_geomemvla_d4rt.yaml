@@ -25,6 +25,10 @@ framework:
     d4rt_model_yaml: starVLA/model/modules/d4rt/model_yaml_48.yaml
     d4rt_ckpt_path: playground/Pretrained_models/OpenD4RT_48CLIP_9Mix_NoCropAUG/opend4rt.ckpt
     clip_frames: 48       # D4RT monocular temporal window length (agentview-only, B1)
+    # [D4RT-WorldState] Spatial patches kept per time-step in the geo/imag condition. D4RT memory
+    # is T*256(+1) tokens (6145 @ 48 frames) — feeding it raw into GR00T cross-attn OOMs. Pool the
+    # 256 spatial patches/step -> geo_pool_tokens (8 -> ~193 tokens), keeping the temporal axis.
+    geo_pool_tokens: 8
     num_cameras: 2
   memory:
     enabled: true
@@ -72,7 +76,7 @@ datasets:
     # [D4RT-WorldState] image_window supplies the agentview temporal series for D4RT
     # (gated with imagination.enabled). win_len is clip_frames=48.
     enable_image_window: true
-    per_device_batch_size: 32
+    per_device_batch_size: 4
     load_all_data_for_training: true
     video_backend: torchvision_av
 
@@ -96,7 +100,7 @@ trainer:
   weight_decay: 0.0
   logging_frequency: 10
   gradient_clipping: 1.0
-  gradient_accumulation_steps: 2
+  gradient_accumulation_steps: 8
   gradient_checkpointing: true
   optimizer:
     name: AdamW
