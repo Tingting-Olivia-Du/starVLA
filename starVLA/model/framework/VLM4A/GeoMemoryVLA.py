@@ -316,7 +316,13 @@ class GeoMemoryVLA(baseframework):
             # dataloader must supply "image_window" (context+chunk+1 frames) when imagination
             # is on; _build_image_window raises ValueError if it is missing (no silent
             # single-frame degeneration). `where` drives stage-1/stage-2 flow-forcing.
-            window = self._build_image_window(examples, device=device)
+            # [D4RT-WorldState] D4RT uses an agentview temporal window (monocular, B1); VGGT
+            # uses the context+chunk+1 multi-view window. Both imaginers accept a raw window.
+            if getattr(self, "_backbone", "vggt_world") == "d4rt":
+                window = _build_d4rt_window(examples, device=device, win_len=self._d4rt_win_len)
+                window = self._cast_to_vggt_dtype(window)
+            else:
+                window = self._build_image_window(examples, device=device)
             imag = self.imaginer.imagine_tokens(window, forecast_frames=self.imag_horizon)
             imag_loss = self.imaginer.training_loss(window, where=float(kwargs.get("where", 0.0)))
 
@@ -375,7 +381,12 @@ class GeoMemoryVLA(baseframework):
             if self.use_imag:
                 # [Geo-MemoryVLA] S2: inference samples carry no image_window (no rolling buffer),
                 # so allow a degenerate static window instead of crashing the eval server.
-                window = self._build_image_window(examples, device=geo.device, allow_degenerate=True)
+                if getattr(self, "_backbone", "vggt_world") == "d4rt":
+                    # [D4RT-WorldState] agentview window; replicate-pads current frame at eval.
+                    window = _build_d4rt_window(examples, device=geo.device, win_len=self._d4rt_win_len)
+                    window = self._cast_to_vggt_dtype(window)
+                else:
+                    window = self._build_image_window(examples, device=geo.device, allow_degenerate=True)
                 imag = self.imaginer.imagine_tokens(window, forecast_frames=self.imag_horizon)
             cond, mask = self._assemble(geo, sem, m_geo, m_sem, imag)
 
