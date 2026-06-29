@@ -317,25 +317,31 @@ class GeoMemoryVLA(baseframework):
             for e in examples:
                 e["image"] = resize_images(e["image"], target_size=train_obs)
 
-        geo, sem, sem_cog = self._encode(examples)
-        episode_ids = [e.get("episode_id", 0) for e in examples]
-        timesteps = [e.get("timestep", 0) for e in examples]
-        m_geo = m_sem = None
-        if self.use_memory:
-            # [Geo-MemoryVLA] B4: clear stale cross-rollout memory at an episode boundary so eval
-            # rollouts don't bleed into each other. Trigger on an explicit reset kwarg or the first
-            # step of a new episode (timestep == 0). Without this, memory.reset() was never called.
-            if bool(kwargs.get("reset", False)) or any(int(t) == 0 for t in timesteps):
-                self.memory.reset()
-            # [Geo-MemoryVLA] pooled cog token into memory (fixed size) — see _pool_cog_token.
-            m_geo, m_sem = self.memory.process(geo, sem_cog, episode_ids, timesteps)
-        imag = None
-        if self.use_imag:
-            # [Geo-MemoryVLA] S2: inference samples carry no image_window (no rolling buffer),
-            # so allow a degenerate static window instead of crashing the eval server.
-            window = self._build_image_window(examples, device=geo.device, allow_degenerate=True)
-            imag = self.imaginer.imagine_tokens(window, forecast_frames=self.imag_horizon)
-        cond, mask = self._assemble(geo, sem, m_geo, m_sem, imag)
+        # [Geo-MemoryVLA] EVAL-AUTOCAST: training wraps the whole forward in autocast(bf16) via the
+        # trainer; predict_action (@inference_mode) had none, so memory cross-attn / VGGT / imagination
+        # ran in float32 against bf16 weights and crashed ("mat1/mat2 must have the same dtype"). Wrap
+        # the compute body in the same bf16 autocast so every submodule matches, eliminating the whole
+        # class of eval dtype mismatches (root-cause fix, not per-module casting).
+        with torch.autocast("cuda", dtype=torch.bfloat16):
+            geo, sem, sem_cog = self._encode(examples)
+            episode_ids = [e.get("episode_id", 0) for e in examples]
+            timesteps = [e.get("timestep", 0) for e in examples]
+            m_geo = m_sem = None
+            if self.use_memory:
+                # [Geo-MemoryVLA] B4: clear stale cross-rollout memory at an episode boundary so eval
+                # rollouts don't bleed into each other. Trigger on an explicit reset kwarg or the first
+                # step of a new episode (timestep == 0). Without this, memory.reset() was never called.
+                if bool(kwargs.get("reset", False)) or any(int(t) == 0 for t in timesteps):
+                    self.memory.reset()
+                # [Geo-MemoryVLA] pooled cog token into memory (fixed size) — see _pool_cog_token.
+                m_geo, m_sem = self.memory.process(geo, sem_cog, episode_ids, timesteps)
+            imag = None
+            if self.use_imag:
+                # [Geo-MemoryVLA] S2: inference samples carry no image_window (no rolling buffer),
+                # so allow a degenerate static window instead of crashing the eval server.
+                window = self._build_image_window(examples, device=geo.device, allow_degenerate=True)
+                imag = self.imaginer.imagine_tokens(window, forecast_frames=self.imag_horizon)
+            cond, mask = self._assemble(geo, sem, m_geo, m_sem, imag)
 
         state = [e["state"] for e in examples] if "state" in examples[0] else None
         state_t = torch.from_numpy(np.array(state)).to(cond.device, dtype=cond.dtype) if state is not None else None

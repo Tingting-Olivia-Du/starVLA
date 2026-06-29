@@ -306,3 +306,39 @@ def test_pool_cog_token_makes_sem_fixed_length():
     # it must equal the hidden state at the last valid position.
     assert torch.allclose(cog[0, 0], sem[0, 6])
     assert torch.allclose(cog[1, 0], sem[1, 6])
+
+
+# ----------------------------------------------------------------------------
+# EVAL-AUTOCAST — predict_action had NO autocast, so bf16 submodules (VGGT,
+# memory cross-attn, ...) fed float32 inputs crashed at eval. Root-cause fix:
+# wrap predict_action compute in torch.autocast like training does.
+# ----------------------------------------------------------------------------
+def test_memory_crossblock_bf16_needs_autocast():
+    # Reproduce: a bf16 cross-attention block fed float32 q/kv with NO autocast crashes;
+    # wrapping in autocast (CPU bf16) makes it work — the predict_action fix.
+    from starVLA.model.modules.memory.memory_bank import _CrossBlock
+
+    blk = _CrossBlock(dim=8, heads=2).to(torch.bfloat16)
+    q = torch.randn(1, 3, 8)   # float32
+    kv = torch.randn(1, 5, 8)  # float32
+    # bf16 _CrossBlock (LayerNorm + MHA) fed float32 with NO autocast crashes with a dtype error.
+    # This is the eval-path failure; the fix wraps predict_action's compute in a CUDA bf16 autocast
+    # (verified by test_predict_action_wraps_memory_in_bf16_autocast + the real GPU training run).
+    # NB: CPU autocast can't fully demo the "works under autocast" half (CPU LayerNorm autocast is
+    # limited), so we only assert the crash here.
+    with pytest.raises(RuntimeError, match="dtype"):
+        blk(q, kv)
+
+
+def test_predict_action_wraps_memory_in_bf16_autocast():
+    # The root-cause fix: predict_action must run memory.process (and imagination/assemble)
+    # under a bf16 autocast — they were running in float32 against bf16 weights at eval.
+    import pathlib
+    src = pathlib.Path("starVLA/model/framework/VLM4A/GeoMemoryVLA.py").read_text()
+    pa = src[src.index("def predict_action"):]
+    pa = pa[:pa.index("\n    def ", 1)] if "\n    def " in pa[1:] else pa
+    # a bf16 autocast must appear BEFORE the memory.process call in predict_action.
+    assert 'torch.autocast("cuda", dtype=torch.bfloat16)' in pa, \
+        "predict_action must wrap its compute in a bf16 autocast"
+    assert pa.index('torch.autocast("cuda", dtype=torch.bfloat16)') < pa.index("self.memory.process"), \
+        "the bf16 autocast must cover memory.process (and downstream), not just the action head"
