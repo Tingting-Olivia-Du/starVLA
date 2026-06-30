@@ -13,7 +13,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from starVLA.model.modules.geomem.d4rt_world_state_adapter import D4RTState
-from tools.d4rt_forecast_probe import build_forecast_query
+# [D4RT-WorldState] build_forecast_query is imported LAZILY at its single call site below.
+# The top-level `tools.*` import depends on repo-root being on sys.path; when it isn't (e.g. the
+# policy server's launch env), the ImportError used to cascade and de-register the WHOLE
+# GeoMemoryVLA framework (incl. the unrelated vggt_world arm). Lazy import isolates that.
 
 
 class LatentForecastHead(nn.Module):
@@ -77,6 +80,9 @@ class D4RTImaginationAdapter(nn.Module):
         model = self._ws.model
         B, T = state.video.shape[0], state.video.shape[1]
         uv = self._grid_uv(state.video.device)
+        # [D4RT-WorldState] lazy import (see top-of-file note): only the d4rt arm needs this, so it
+        # must not break GeoMemoryVLA registration when repo-root `tools/` isn't on sys.path.
+        from tools.d4rt_forecast_probe import build_forecast_query
         outs = []
         for k in range(forecast_frames):
             q1 = build_forecast_query(uv, t_src=T - 1, t_tgt=T - 1 + k, device=state.video.device)
