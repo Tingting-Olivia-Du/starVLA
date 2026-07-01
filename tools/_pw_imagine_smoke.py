@@ -7,7 +7,7 @@ from starVLA.model.modules.langpw.pointworld_teacher import PointWorldTeacher
 
 HDF5 = sys.argv[1]
 CKPT = sys.argv[2]
-HORIZON = 8
+HORIZON = 11
 print("[smoke] VGGT ...", flush=True)
 g = VGGTGeometryProvider(device="cuda")
 dp = g.depth_provider(HDF5, "demo_0")

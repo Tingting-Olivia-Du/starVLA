@@ -116,3 +116,12 @@ the single biggest open risk and is precisely what the gate exists to answer che
 pass (18 tests). The `libero_to_datadict` bridge is written but the exact camera_data key naming
 the DINOv3 featurizer expects (`_extract_camera_data`) still needs a GPU iteration to pin — this
 is the next concrete step to a real imagine() forward, then the gate verdict.
+
+## 8. Model sequence length T=11 (CONTEXT_HORIZON=1 + PRED_HORIZON=10)
+
+pointworld/base.py:32-33: `CONTEXT_HORIZON=1, PRED_HORIZON=10` → `self.T=11`. The model takes
+t=0 context and predicts T-1=10 future frames. **The bridge horizon MUST be 11** — scene_features
+dim is `scene_flows(3)+scene_colors(3)+scene_normals(3)+gripper_open(T)+dist2robot(T)` = 9+2T = 31
+at T=11 (was 25 at T=8, a shape-mismatch crash). robot_features=16 is T-independent
+(flows3+colors3+normals3+gripper1+vel3+accel3). This T=11 is fixed by the checkpoint; the probe
+and cache both use horizon=11 and read out the 10 predicted future frames.
