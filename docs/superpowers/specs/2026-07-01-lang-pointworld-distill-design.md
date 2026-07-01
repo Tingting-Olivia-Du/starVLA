@@ -166,7 +166,8 @@ the **real** demo actions (→ FK → robot-flow) and the t=0 RGB-D scene; compa
 **imagined** future scene-flow against the **GT** future flow (from sim depth across
 frames), on task-relevant points (gripper + moved-object points).
 
-**Gate metrics (both required) + visualization:**
+**Gate metrics (both required) + visualization — all computed in the EE-centric frame**
+(same frame training uses, so the gate validates the labels the student will actually see):
 1. **Per-dim correlation** of imagined vs GT displacement on key points — sensitive to
    direction/sign errors, tolerant of scale offset. **Gate: key-point corr > 0.7.**
    (Same instrument that surfaced FCDecoder under-drive.)
@@ -177,10 +178,33 @@ frames), on task-relevant points (gripper + moved-object points).
    numbers aren't lying (mirrors `d4rt_probe_visualize.py`).
 
 **Coordinate-frame discipline (must be pinned before the probe means anything):** teacher
-flow, GT flow, and later student flow must live in **one** frame. V1 default:
-**robot-base frame** (LIBERO sim gives reliable camera extrinsics, so
-`T_camera_to_base` is exact — the source plan's §9.3 concern is a non-issue in sim).
-Object-relative is a V2+ robustness upgrade.
+flow, GT flow, and later student flow must live in **one** frame. **V1 default:
+EE/gripper-centric ("robo-centric") frame** — each future displacement expressed relative
+to the **current-frame end-effector pose** (origin = EE position, axes = EE orientation),
+using the per-frame EE pose already present in proprio.
+
+Rationale — **cross-dataset unification** (the reason this is the default, not robot-base):
+the EE/gripper is the one anchor that is *semantically identical across every robot*
+(DROID Franka, LIBERO Panda, BEHAVIOR, real arms), whereas each dataset's raw *base frame*
+has a different origin, scale, and orientation, so distilling in base frame would force the
+student to learn several inconsistent coordinate systems. Expressing point-flow as motion
+*relative to the gripper* makes the skill geometry ("how the object moves w.r.t. the hand")
+transferable, and aligns the flow frame with the student's EE-delta action space (§5) so
+flow→action coupling (§5.4) shares one reference. This is what lets a LIBERO-only V1 add
+DROID/real-robot data later **without changing the coordinate system or retraining**.
+
+Mechanics & discipline:
+- **Cache-time transform (offline, free):** PointWorld emits scene-flow in camera/world
+  frame; the cache script re-expresses it into the current-frame EE frame using that
+  frame's EE pose before saving. One transform, no training cost.
+- **Same-frame comparison (assert):** the EE origin moves every frame, so a displacement
+  is only meaningful in *its own frame's* EE system. The cache builder, the probe, and the
+  loss all compare teacher vs GT vs student in the **same timestep's EE frame** — asserted
+  in code; never mix frames across timesteps.
+- **Alternatives:** **robot-base frame** is retained only as a *sim-only debug reference*
+  (LIBERO extrinsics make `T_camera→base` exact, useful for sanity plots). **Object-relative**
+  (`P − center_object`) is a **V2** robustness upgrade, complementary to EE-centric when
+  absolute object localization is needed.
 
 **Kill / branch criterion (explicit):**
 - Gate **passes** → proceed to V0/V1.
@@ -199,6 +223,13 @@ Object-relative is a V2+ robustness upgrade.
 ### 5.1 Inputs (reuse host; no new dataloader)
 Dual-view RGB temporal window `K∈{2,4}`, language, proprio window — all already available
 to `GeoMemoryVLA`. **No RGB-D at student input** (RGB-D is teacher-only, offline).
+Proprio must carry the **per-frame EE pose** (used for the EE-centric transform, §4).
+
+**Memory is a switch, and V1 defaults it OFF.** The host's dual-memory bank
+([[geo-memoryvla-design]]) is **orthogonal** to `pw_distill`: V1 sets memory off (e.g.
+`world_state.stream = sem_only` / memory disabled) to keep the controlled experiment to a
+single variable (`pw_distill ∈ {off,on}`). Memory is a later, independent ablation axis,
+not V1 work.
 
 ### 5.2 Recommended starting values
 `K=2`, action horizon `Ha` = host default, flow horizon `Hf∈{4..8}`, sparse points
@@ -260,8 +291,9 @@ better-ordered risk.
 separately when reached.
 **Explicitly deferred:** dense full-scene flow (§15.1 plan — sparse only); scheduled
 teacher-forcing; candidate-action ranking (plan V4); geometry-backbone student (plan V5);
-real-robot / LeRobot benchmark; online PointWorld at inference. These are **not** V1 work
-and must not leak into the V1 implementation plan.
+real-robot / LeRobot benchmark; online PointWorld at inference; **dual-memory bank (off in
+V1, §5.1)**; object-relative frame (V2, §4). These are **not** V1 work and must not leak
+into the V1 implementation plan.
 
 ---
 
@@ -281,7 +313,7 @@ and must not leak into the V1 implementation plan.
 | Risk | Mitigation |
 | --- | --- |
 | Teacher flow wrong from bad depth | LIBERO sim depth is clean; confidence masks in cache weight the loss; C0 gate catches gross errors first. |
-| Student can't infer metric 3D from RGB | dual views + temporal window + robot-base-frame targets; predict normalized flow if needed. |
+| Student can't infer metric 3D from RGB | dual views + temporal window + EE-centric targets (relative motion, not absolute metric depth); predict normalized flow if needed. |
 | Flow head learns but doesn't help action | `feed_flow_tokens` couples flow into the head; ablate on/off; V3 inverse-consistency as the stronger coupling later. |
 | Repo drift from starVLA conventions | enforced `[LangPointWorld]` marker + config-switch controlled experiment + reuse of host dataloader/eval — no standalone `project/` tree (rejecting source plan §14.1). |
-| Coordinate-frame mismatch (teacher vs student) | pinned to robot-base frame in sim; asserted in cache-build and probe; single source of truth. |
+| Coordinate-frame mismatch (teacher vs student) | pinned to EE-centric frame, compared in the same-timestep EE system; asserted in cache-build, probe, and loss; single source of truth (§4). |
