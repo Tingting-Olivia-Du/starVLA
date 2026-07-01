@@ -7,6 +7,9 @@
 import numpy as np
 import torch
 import h5py
+import cv2
+
+_VGGT_SIZE = 518  # VGGT requires input dims divisible by patch=14; 518 is its target
 
 
 class VGGTGeometryProvider:
@@ -32,13 +35,22 @@ class VGGTGeometryProvider:
     @torch.no_grad()
     def _run_vggt(self, hdf5_path, demo, cam_key):
         from vggt.utils.pose_enc import pose_encoding_to_extri_intri
-        rgb = self._load_rgb_seq(hdf5_path, demo, cam_key)         # [T,H,W,3]
+        rgb = self._load_rgb_seq(hdf5_path, demo, cam_key)         # [T,H,W,3] native (128)
         T, H, W, _ = rgb.shape
-        imgs = torch.from_numpy(rgb).float().div(255.0).permute(0, 3, 1, 2).to(self.device)  # [T,3,H,W]
+        # VGGT needs dims divisible by 14; resize to 518x518, run, then map depth back to native.
+        rgb_v = np.stack([cv2.resize(f, (_VGGT_SIZE, _VGGT_SIZE), interpolation=cv2.INTER_AREA)
+                          for f in rgb], 0)
+        imgs = torch.from_numpy(rgb_v).float().div(255.0).permute(0, 3, 1, 2).to(self.device)  # [T,3,518,518]
         with torch.autocast("cuda", dtype=self.dtype):
             pred = self.model(imgs)  # adds batch dim internally -> [1,T,...]
-        depth = pred["depth"][0, ..., 0].float().cpu().numpy()     # [T,H,W]
-        ext, intr = pose_encoding_to_extri_intri(pred["pose_enc"], image_size_hw=(H, W))
+        depth_v = pred["depth"][0, ..., 0].float().cpu().numpy()   # [T,518,518]
+        # resize depth back to native LIBERO resolution so it aligns with the RGB the adapter reads
+        depth = np.stack([cv2.resize(d, (W, H), interpolation=cv2.INTER_NEAREST) for d in depth_v], 0)  # [T,H,W]
+        # intrinsics were produced at 518; rescale focal/principal to native pixels
+        ext, intr = pose_encoding_to_extri_intri(pred["pose_enc"], image_size_hw=(_VGGT_SIZE, _VGGT_SIZE))
+        intr = intr.clone()
+        intr[..., 0, :] *= (W / _VGGT_SIZE)   # fx, cx  -> native x scale
+        intr[..., 1, :] *= (H / _VGGT_SIZE)   # fy, cy  -> native y scale
         ext = ext[0].float().cpu().numpy()                          # [T,3,4]
         intr = intr[0].float().cpu().numpy()                        # [T,3,3]
         # promote extrinsics [3,4] -> [4,4]
