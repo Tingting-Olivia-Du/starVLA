@@ -36,14 +36,22 @@ def gt_ee_future_flow(hdf5, demo, t0, horizon):
     return np.stack([ee[min(t0 + h, T - 1)] - ee[t0] for h in range(1, horizon)], 0)  # [H-1,3]
 
 
-def imagined_gripper_flow(out, data_dict, ee_pos):
-    """Reduce imagined full-scene flow to gripper-region motion: mean predicted displacement of
-    the K scene points nearest the EE at t=0. Returns [H-1,3] world-frame per-step displacement."""
+def imagined_gripper_flow(out, data_dict, ee_pos, mode="motion"):
+    """Reduce imagined full-scene flow to a per-step [H-1,3] world-frame displacement.
+
+    mode='motion' (default): average the predicted displacement over the K points the MODEL
+    predicts move most (highest total horizon displacement). This measures "does the model's
+    predicted motion track the GT arm/object motion", which is the right question — selecting by
+    proximity to EE at t=0 instead picks static background (the initial gate's methodology bug).
+    mode='near_ee': legacy proximity selection (kept for comparison)."""
     scene_flows = out["scene_flows"]                      # [T,Ns,3] absolute positions
     coord0 = out["scene_coord0"]                          # [Ns,3]
-    d0 = torch.norm(coord0 - torch.as_tensor(ee_pos, dtype=coord0.dtype), dim=-1)
-    kp = torch.topk(-d0, k=min(64, d0.numel())).indices
-    # displacement from t=0 for frames 1..T-1
+    total_disp = torch.norm(scene_flows[-1] - scene_flows[0], dim=-1)  # [Ns]
+    if mode == "near_ee":
+        d0 = torch.norm(coord0 - torch.as_tensor(ee_pos, dtype=coord0.dtype), dim=-1)
+        kp = torch.topk(-d0, k=min(64, d0.numel())).indices
+    else:  # motion
+        kp = torch.topk(total_disp, k=min(64, total_disp.numel())).indices
     disp = scene_flows[1:, kp, :] - scene_flows[0:1, kp, :].expand(scene_flows.shape[0] - 1, -1, -1)
     return disp.mean(dim=1)                               # [T-1,3]
 
