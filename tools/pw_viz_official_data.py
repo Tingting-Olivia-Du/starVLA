@@ -29,16 +29,35 @@ def main():
     urdf_path = Path(resolve_default_robot_urdf(args.domains))
     visualizer = PredictionVisualizer(viz_config, urdf_path=urdf_path)
 
-    live_session = None
+    # scan up to SCAN batches, pick the sample whose GT scene flow moves the MOST (a real
+    # manipulation window), so the viewer shows an object actually being moved.
+    import os
+    SCAN = int(os.environ.get("VIZ_SCAN", "40"))
+    best = None  # (motion, batch, i)
+    scanned = 0
     for batch in dl:
-        batch = {k: (v.to(tester.device) if isinstance(v, torch.Tensor) else v) for k, v in batch.items()}
+        if scanned >= SCAN:
+            break
+        scanned += 1
+        b = {k: (v.to(tester.device) if isinstance(v, torch.Tensor) else v) for k, v in batch.items()}
+        gtf = b["gt_scene_flows"].detach().cpu().numpy()
+        for i in range(gtf.shape[0]):
+            mv = np.linalg.norm(gtf[i][-1] - gtf[i][0], axis=-1)
+            score = float(np.quantile(mv, 0.99))  # top-1% point displacement
+            if best is None or score > best[0]:
+                best = (score, batch, i)
+    print(f"[viz-official] scanned {scanned} batches; best GT motion (p99 disp) = {best[0]:.3f}", flush=True)
+
+    live_session = None
+    for _ in range(1):
+        batch = {k: (v.to(tester.device) if isinstance(v, torch.Tensor) else v) for k, v in best[1].items()}
         with torch.no_grad():
             outputs = tester.model(batch, training=False)
         batch_np = {k: (v.detach().cpu().numpy() if isinstance(v, torch.Tensor) else v) for k, v in batch.items()}
         gt = batch_np["gt_scene_flows"]
         pred = outputs["scene_flows"].detach().cpu().numpy()
         B = gt.shape[0]
-        i = 0  # first sample only
+        i = best[2]
         sample_dict = {}
         for key, value in batch_np.items():
             if isinstance(value, np.ndarray):
