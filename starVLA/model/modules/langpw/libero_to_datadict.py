@@ -80,13 +80,31 @@ class LiberoDataDictBuilder:
         out = _get_robot_flows_droid(sample, self.robot_sampler, self.max_robot_points)
         return np.asarray(out["robot_flows"], np.float32)  # [T,Nr,3]
 
-    def build(self, libero_sample, joint_states, gripper_states, horizon):
+    @staticmethod
+    def _time_indices(n_frames, horizon, mode="linspace"):
+        """Which `horizon` real demo timesteps the T model-steps map to.
+        'linspace' (default): equally spaced over the WHOLE demo, so the action covers the full
+          approach->grasp->move->place arc (fixes the 'front 7% only' near-static issue).
+        'head': the first `horizon` consecutive frames (legacy)."""
+        if mode == "head" or n_frames <= horizon:
+            idx = np.arange(min(horizon, n_frames))
+            if idx.shape[0] < horizon:
+                idx = np.concatenate([idx, np.full(horizon - idx.shape[0], idx[-1])])
+            return idx
+        return np.linspace(0, n_frames - 1, horizon).round().astype(int)
+
+    def build(self, libero_sample, joint_states, gripper_states, horizon, time_mode="linspace"):
         """libero_sample: build_pw_sample output (RGB/depth/K/E per cam). Returns a data_dict
         with numpy arrays ready to be tensor-ized + unsqueezed by the teacher. Reuses
         PointWorld's gather_features so scene/robot features (31/16-dim) are REAL, not fabricated
-        — otherwise the probe would measure the teacher on garbage features."""
+        — otherwise the probe would measure the teacher on garbage features.
+        time_mode selects which demo timesteps the T action steps map to (see _time_indices)."""
         _ensure_pw_on_path()
         from dataset_components.robot import gather_features
+        # sample the T action timesteps across the demo (default: full-demo equal spacing)
+        ti = self._time_indices(len(joint_states), horizon, mode=time_mode)
+        joint_states = np.asarray(joint_states)[ti]
+        gripper_states = np.asarray(gripper_states)[ti]
         # --- scene points at t=0 from agentview depth unprojection (world frame) ---
         depth = libero_sample["agentview_initial_depth"]        # [180,320] (already PW res)
         rgb = libero_sample["agentview_initial_rgb"]            # [180,320,3]
@@ -104,13 +122,13 @@ class LiberoDataDictBuilder:
         scene_colors = np.tile(scene_colors0[None], (T, 1, 1)).astype(np.float32)
         scene_normals = np.zeros((T, Ns, 3), np.float32)      # normals unavailable from mono depth -> zeros
 
-        rf_out = self._robot_flows_full(joint_states[:T], gripper_states[:T], T)
+        rf_out = self._robot_flows_full(joint_states, gripper_states, T)
         robot_flows = rf_out["robot_flows"]; robot_colors = rf_out["robot_colors"]; robot_normals = rf_out["robot_normals"]
         Nr = robot_flows.shape[1]
         robot_exists = np.ones((T, Nr), bool)
 
         # gripper_open from LIBERO gripper_states (mean jaw -> open scalar in 0..1)
-        gopen = np.asarray(gripper_states[:T], np.float64).mean(axis=1).reshape(T, 1).astype(np.float32)
+        gopen = np.asarray(gripper_states, np.float64).mean(axis=1).reshape(-1, 1).astype(np.float32)
         if gopen.shape[0] < T:
             gopen = np.concatenate([gopen, np.repeat(gopen[-1:], T - gopen.shape[0], 0)], 0)
 

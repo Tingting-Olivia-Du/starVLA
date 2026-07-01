@@ -32,8 +32,11 @@ def gt_ee_future_flow(hdf5, demo, t0, horizon):
     under-drive probe); full-scene GT would need depth-tracked points."""
     with h5py.File(hdf5, "r") as f:
         ee = np.asarray(f["data"][demo]["obs"]["ee_pos"][:], np.float64)
-    T = ee.shape[0]
-    return np.stack([ee[min(t0 + h, T - 1)] - ee[t0] for h in range(1, horizon)], 0)  # [H-1,3]
+    n = ee.shape[0]
+    # Sample EE at the SAME full-demo linspace timesteps the action uses (LiberoDataDictBuilder
+    # ._time_indices 'linspace'), so GT motion is comparable to the imagined future.
+    ti = np.linspace(0, n - 1, horizon).round().astype(int)
+    return np.stack([ee[ti[h]] - ee[ti[0]] for h in range(1, horizon)], 0)  # [H-1,3]
 
 
 def imagined_gripper_flow(out, data_dict, ee_pos, mode="motion"):
