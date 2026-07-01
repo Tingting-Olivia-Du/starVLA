@@ -106,3 +106,38 @@ moment the gate is cleared.
 criterion). If corrected probes still fail, I stop at "infrastructure complete + gate red" and
 hand off with the object-pose-GT probe as the recommended next step — not burn GPU-hours training
 on labels the gate rejected.
+
+## Full-demo action sampling (2026-07-01, later) — corr DROPPED 0.48→0.31, but more informative
+
+Changed the 11 action timesteps from "front 11 consecutive frames" (~7% of a 148-frame demo,
+mostly static approach) to **equally-spaced across the WHOLE demo** (approach→grasp→move→place).
+Scene motion richness rose sharply (ep0 moved>1cm: 9%→38.6%; pred mean disp ×2.3).
+
+**Gate result: corr_mean 0.48 → 0.31; L2_mean 0.05 → 0.25 (×5).** Per-episode:
+
+| ep | front-11 | full-demo | note |
+|----|----------|-----------|------|
+| ep0 | 0.99 | 0.39 | strong→mid |
+| ep1 | 0.38 | 0.56 | up |
+| ep2 | -0.16 | 0.37 | up (was anti) |
+| ep3 | 0.11 | 0.22 | up |
+| ep4 | 0.37 | 0.56 | up |
+| ep5 | -0.11 | 0.53 | up (was anti) |
+| ep6 | 0.85 | 0.01 | strong→collapse |
+| ep7 | 0.81 | 0.41 | strong→mid |
+
+**Interpretation (the real signal):** full-demo **reduced variance** (no more 0.99/-0.16 extremes)
+and lifted every previously-weak episode, but pulled the strong ones down → lower mean. The key
+diagnostic is magnitude: GT EE displacement grew ×10 (long curved full-task trajectory) but the
+teacher's predicted motion only grew ×3 → **the teacher UNDER-DRIVES large/long-range motion** on
+LIBERO (same class of under-drive seen in [[vla-rlds-closedloop-rootcause]]). The front-11 0.48 was
+partly inflated: short, near-linear EE motion is trivially easier to correlate than the full
+approach→grasp→move→place arc. So neither number clears 0.7; full-demo is the more honest, harder
+test and reveals under-drive as the core failure mode, not a fixable sampling artifact.
+
+**Updated recommendation:** the EE-motion-vs-scene-motion proxy AND under-drive both cap this
+gate. Two paths remain the right calls: (1) object-pose GT probe (needs sim env) to remove the
+proxy mismatch; (2) pilot V1 and let closed-loop success decide — a distillation loss can still
+transfer *direction* even if the teacher under-drives *magnitude* (normalize/whiten flow before
+the distill loss). Under-drive is exactly the kind of bias a magnitude-normalized distill target
+sidesteps. Still NOT a clean gate pass → not auto-training.
