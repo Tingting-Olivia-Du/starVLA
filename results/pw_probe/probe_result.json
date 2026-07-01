@@ -1,0 +1,13 @@
+{
+  "corr_x": -0.09840110835519501,
+  "corr_y": -0.030412965052370445,
+  "corr_z": 0.3943954689542636,
+  "corr_mean": 0.08852713184889938,
+  "l2_mean": 0.025801274925470352,
+  "l2_p50": 0.01815585233271122,
+  "l2_p90": 0.0583769790828228,
+  "gate_pass": false,
+  "n_episodes": 8,
+  "ckpt": "/root/angli/hf_cache/hub/models--nvidia--PointWorld_models/snapshots/b9e2e19a4f2bd65922e1f6d70aa953fe70aa9dba/large-droid/model-best.pt",
+  "corr_thresh": 0.7
+}
