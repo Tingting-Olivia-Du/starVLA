@@ -64,6 +64,37 @@ class VGGTGeometryProvider:
             self._cache[key] = self._run_vggt(hdf5_path, demo, cam_key)
         return self._cache[key]
 
+    @torch.no_grad()
+    def dual_view_t0(self, hdf5_path, demo, cam_keys=("agentview_rgb", "eye_in_hand_rgb"), t=0):
+        """Run VGGT on the t=0 frames of MULTIPLE cameras TOGETHER (VGGT is natively multi-view),
+        so both views' depth+pose come back in ONE shared coordinate system — the correct way to
+        fuse agentview+wrist point clouds (independent per-camera VGGT runs would be in different
+        world frames and misalign). Returns per-cam {rgb,depth,K,E} in the shared frame."""
+        from vggt.utils.pose_enc import pose_encoding_to_extri_intri
+        rgbs, native_hw = [], []
+        for ck in cam_keys:
+            r = self._load_rgb_seq(hdf5_path, demo, ck)[t]            # [H,W,3] native, un-flipped
+            native_hw.append(r.shape[:2])
+            rgbs.append(cv2.resize(r, (_VGGT_SIZE, _VGGT_SIZE), interpolation=cv2.INTER_AREA))
+        imgs = torch.from_numpy(np.stack(rgbs, 0)).float().div(255.0).permute(0, 3, 1, 2).to(self.device)  # [V,3,518,518]
+        with torch.autocast("cuda", dtype=self.dtype):
+            pred = self.model(imgs)                                    # [1,V,...] one shared frame
+        depth_v = pred["depth"][0, ..., 0].float().cpu().numpy()      # [V,518,518]
+        ext, intr = pose_encoding_to_extri_intri(pred["pose_enc"], image_size_hw=(_VGGT_SIZE, _VGGT_SIZE))
+        ext = ext[0].float().cpu().numpy()                            # [V,3,4]
+        intr = intr[0].float().cpu().numpy()                         # [V,3,3]
+        out = {}
+        for i, ck in enumerate(cam_keys):
+            H, W = native_hw[i]
+            d = cv2.resize(depth_v[i], (W, H), interpolation=cv2.INTER_NEAREST)
+            K = intr[i].copy()
+            K[0, :] *= (W / _VGGT_SIZE); K[1, :] *= (H / _VGGT_SIZE)
+            E = np.eye(4, dtype=np.float64); E[:3, :4] = ext[i]
+            rgb_native = self._load_rgb_seq(hdf5_path, demo, ck)[t]   # native un-flipped RGB
+            out[ck] = {"rgb": rgb_native, "depth": d.astype(np.float32),
+                       "K": K.astype(np.float64), "E": E}
+        return out
+
     def depth_provider(self, hdf5_path, demo):
         """Returns a callable (cam_key, t) -> HxW float32 depth, matching build_pw_sample's
         depth_provider contract. VGGT camera keys map from LIBERO obs keys."""

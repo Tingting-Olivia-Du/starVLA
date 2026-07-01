@@ -160,6 +160,76 @@ class LiberoDataDictBuilder:
         }
         return data_dict
 
+    def build_dualview(self, dual_geo, joint_states, gripper_states, horizon,
+                       time_mode="linspace", cam_keys=("agentview_rgb", "eye_in_hand_rgb")):
+        """Dual-view variant: dual_geo = VGGTGeometryProvider.dual_view_t0() output (both cameras
+        in ONE shared VGGT frame). Merges both views' t=0 unprojected clouds into one scene point
+        cloud AND passes both cameras (cam0=agentview, cam1=wrist) so PW's multi-view scene encoder
+        uses both. This is the user's insight: PW natively supports multi-camera scene input; a
+        second view yields a more complete, better-triangulated 3D cloud than agentview mono alone."""
+        import cv2 as _cv2
+        _ensure_pw_on_path()
+        from dataset_components.robot import gather_features
+
+        _PW_HW = (180, 320)
+        cams_out, cloud_pts, cloud_cols = {}, [], []
+        for i, ck in enumerate(cam_keys):
+            g = dual_geo[ck]
+            pts, cols, _ = unproject_depth_to_points(
+                g["depth"], g["K"], g["E"], rgb=g["rgb"],
+                max_points=self.max_scene_points // len(cam_keys))
+            cloud_pts.append(pts); cloud_cols.append((np.clip(cols, 0, 1) * 255).astype(np.uint8))
+            # camera payload for PW scene encoder, resized to (180,320)
+            rgb_p = _cv2.resize(g["rgb"], (_PW_HW[1], _PW_HW[0]), interpolation=_cv2.INTER_AREA)
+            dep_p = _cv2.resize(g["depth"], (_PW_HW[1], _PW_HW[0]), interpolation=_cv2.INTER_NEAREST)
+            Kp = g["K"].copy()
+            Kp[0, :] *= (_PW_HW[1] / g["depth"].shape[1]); Kp[1, :] *= (_PW_HW[0] / g["depth"].shape[0])
+            cams_out[f"cam{i}"] = {"rgb": rgb_p, "depth": dep_p.astype(np.float32),
+                                  "K": Kp.astype(np.float64), "E": g["E"].astype(np.float64)}
+        scene0 = np.concatenate(cloud_pts, 0).astype(np.float32)      # merged cloud (shared frame)
+        scene_colors0 = np.concatenate(cloud_cols, 0)
+        Ns = scene0.shape[0]
+        T = horizon
+        scene_flows = np.tile(scene0[None], (T, 1, 1))
+        scene_exists = np.ones((T, Ns), bool)
+        scene_colors = np.tile((scene_colors0.astype(np.float32) / 255.0)[None], (T, 1, 1))
+        scene_normals = np.zeros((T, Ns, 3), np.float32)
+
+        # robot flows (same as single-view)
+        ti = self._time_indices(len(joint_states), horizon, mode=time_mode)
+        js, gs = np.asarray(joint_states)[ti], np.asarray(gripper_states)[ti]
+        rf_out = self._robot_flows_full(js, gs, T)
+        robot_flows, robot_colors, robot_normals = rf_out["robot_flows"], rf_out["robot_colors"], rf_out["robot_normals"]
+        Nr = robot_flows.shape[1]
+        robot_exists = np.ones((T, Nr), bool)
+        gopen = np.asarray(gs, np.float64).mean(axis=1).reshape(-1, 1).astype(np.float32)
+
+        feat_sample = {
+            "scene_flows": scene_flows, "scene_colors": scene_colors, "scene_normals": scene_normals,
+            "robot_flows": robot_flows, "robot_colors": robot_colors, "robot_normals": robot_normals,
+            "right_gripper_open": gopen,
+        }
+        gather_features(feat_sample, domain=self.domain)
+        sf = feat_sample["scene_features"]
+        scene_features = np.tile(sf, (T, 1, 1)) if sf.shape[0] == 1 else sf
+
+        data_dict = {
+            "scene_flows": scene_flows.astype(np.float32),
+            "scene_features": scene_features.astype(np.float32),
+            "scene_exists": scene_exists,
+            "robot_flows": robot_flows.astype(np.float32),
+            "robot_features": feat_sample["robot_features"].astype(np.float32),
+            "robot_exists": robot_exists,
+            "__domain__": self.domain,
+            "_scene_colors_u8": scene_colors0,  # for viz
+        }
+        for cname, c in cams_out.items():
+            data_dict[f"{cname}_initial_rgb"] = c["rgb"]
+            data_dict[f"{cname}_initial_depth"] = c["depth"]
+            data_dict[f"{cname}_intrinsic"] = c["K"]
+            data_dict[f"{cname}_extrinsic"] = c["E"]
+        return data_dict
+
     def _robot_flows_full(self, joint_states, gripper_states, T):
         """Like build_robot_flows but returns colors/normals too, padded to T frames."""
         _ensure_pw_on_path()
