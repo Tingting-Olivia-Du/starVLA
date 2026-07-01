@@ -232,12 +232,12 @@ class LiberoDataDictBuilder:
         return data_dict
 
     def build_from_sim(self, sim_npz, joint_states, gripper_states, horizon,
-                       cam="agentview", flip_depth=True):
+                       cams=("agentview", "robot0_eye_in_hand"), flip_depth=True):
         """Build a WORLD-FRAME-ALIGNED data_dict from tools/pw_sim_render.py output. Scene cloud =
-        sim REAL metric depth unprojected with sim REAL K/E (cam->world); robot cloud = FK points
-        transformed into the world frame via the sim robot0_base pose. Scene+robot share ONE metric
-        world frame with zero misalignment (unlike VGGT depth + identity extrinsic). This is the
-        root-cause fix. cam is the PW cam0 view; a second cam can be added later."""
+        MULTI-VIEW: each camera's sim REAL metric depth unprojected with its sim REAL K/E
+        (cam->world) and MERGED (both views share the sim world frame -> aligned). Robot cloud = FK
+        points transformed to world via the sim robot0_base pose. Scene+robot in ONE metric world
+        frame, zero misalignment. `cams` = the PW views (cam0, cam1, ...). Single-view = one cam."""
         import cv2 as _cv2
         _ensure_pw_on_path()
         from dataset_components.robot import gather_features
@@ -247,19 +247,30 @@ class LiberoDataDictBuilder:
         names = list(z["obj_names"])
         base_T = z["obj_poses"][0][names.index("robot0_base")]      # robot base -> world (t=0)
 
-        # scene cloud at t=0 from sim real depth + real K/E (cam->world)
-        depth = z[f"{cam}_depth"][0].copy()
-        rgb0 = z[f"{cam}_rgb"][0]
-        if flip_depth:                                             # robosuite depth is opengl-flipped
-            depth = depth[::-1, :]; rgb0 = rgb0[::-1, :, :]
-        K = z[f"{cam}_K"][0].astype(np.float64)
-        E_c2w = z[f"{cam}_E_cam2world"][0].astype(np.float64)
-        E_w2c = np.linalg.inv(E_c2w)                               # unproject helper wants world->cam
-        scene0, scene_colors0, _ = unproject_depth_to_points(
-            depth, K, E_w2c, rgb=rgb0, max_points=self.max_scene_points)
-        # drop far background (floor/walls) beyond the table workspace to focus the cloud
-        keep = (np.abs(scene0[:, 0]) < 1.2) & (np.abs(scene0[:, 1]) < 1.2) & (scene0[:, 2] > -0.05) & (scene0[:, 2] < 1.2)
-        scene0, scene_colors0 = scene0[keep], scene_colors0[keep]
+        # --- multi-view scene cloud: unproject each camera's t=0 depth into the shared world frame ---
+        cams = tuple(cams) if isinstance(cams, (list, tuple)) else (cams,)
+        per_cam = []            # payloads for PW cam0/cam1/...
+        cloud_pts, cloud_cols = [], []
+        per_cam_budget = max(1, self.max_scene_points // len(cams))
+        for c in cams:
+            depth = z[f"{c}_depth"][0].copy()
+            rgb0 = z[f"{c}_rgb"][0]
+            if flip_depth:                                         # robosuite depth is opengl-flipped
+                depth = depth[::-1, :]; rgb0 = rgb0[::-1, :, :]
+            K = z[f"{c}_K"][0].astype(np.float64)
+            E_c2w = z[f"{c}_E_cam2world"][0].astype(np.float64)
+            E_w2c = np.linalg.inv(E_c2w)
+            pts, cols, _ = unproject_depth_to_points(depth, K, E_w2c, rgb=rgb0, max_points=per_cam_budget)
+            keep = (np.abs(pts[:, 0]) < 1.2) & (np.abs(pts[:, 1]) < 1.2) & (pts[:, 2] > -0.05) & (pts[:, 2] < 1.2)
+            cloud_pts.append(pts[keep]); cloud_cols.append(cols[keep])
+            # PW camera payload (world->cam extrinsic, resized to 180x320)
+            rgb_p = _cv2.resize(rgb0, (_PW_HW[1], _PW_HW[0]), interpolation=_cv2.INTER_AREA)
+            dep_p = _cv2.resize(depth, (_PW_HW[1], _PW_HW[0]), interpolation=_cv2.INTER_NEAREST)
+            Kp = K.copy(); Kp[0, :] *= (_PW_HW[1] / depth.shape[1]); Kp[1, :] *= (_PW_HW[0] / depth.shape[0])
+            per_cam.append({"rgb": rgb_p, "depth": dep_p.astype(np.float32),
+                            "K": Kp.astype(np.float64), "E": E_w2c.astype(np.float64)})
+        scene0 = np.concatenate(cloud_pts, 0)                       # merged multi-view cloud (world frame)
+        scene_colors0 = np.concatenate(cloud_cols, 0)
         Ns = scene0.shape[0]
         T = horizon
         scene_flows = np.tile(scene0[None], (T, 1, 1)).astype(np.float32)
@@ -290,11 +301,6 @@ class LiberoDataDictBuilder:
         sf = feat_sample["scene_features"]
         scene_features = np.tile(sf, (T, 1, 1)) if sf.shape[0] == 1 else sf
 
-        # PW camera payload (world->cam extrinsic, resized to 180x320)
-        rgb_p = _cv2.resize(rgb0, (_PW_HW[1], _PW_HW[0]), interpolation=_cv2.INTER_AREA)
-        dep_p = _cv2.resize(depth, (_PW_HW[1], _PW_HW[0]), interpolation=_cv2.INTER_NEAREST)
-        Kp = K.copy(); Kp[0, :] *= (_PW_HW[1] / depth.shape[1]); Kp[1, :] *= (_PW_HW[0] / depth.shape[0])
-
         data_dict = {
             "scene_flows": scene_flows.astype(np.float32),
             "scene_features": scene_features.astype(np.float32),
@@ -303,13 +309,15 @@ class LiberoDataDictBuilder:
             "robot_flows": robot_flows,
             "robot_features": feat_sample["robot_features"].astype(np.float32),
             "robot_exists": robot_exists,
-            "cam0_initial_rgb": rgb_p,
-            "cam0_initial_depth": dep_p.astype(np.float32),
-            "cam0_intrinsic": Kp.astype(np.float64),
-            "cam0_extrinsic": E_w2c.astype(np.float64),
             "__domain__": self.domain,
             "_scene_colors_u8": (np.clip(scene_colors0, 0, 1) * 255).astype(np.uint8),
         }
+        # emit each view as cam0, cam1, ... for PW's multi-view scene encoder
+        for ci, pc in enumerate(per_cam):
+            data_dict[f"cam{ci}_initial_rgb"] = pc["rgb"]
+            data_dict[f"cam{ci}_initial_depth"] = pc["depth"]
+            data_dict[f"cam{ci}_intrinsic"] = pc["K"]
+            data_dict[f"cam{ci}_extrinsic"] = pc["E"]
         return data_dict
 
     def _robot_flows_full(self, joint_states, gripper_states, T):
