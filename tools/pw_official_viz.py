@@ -115,7 +115,18 @@ def main():
     urdf = os.path.join(_PW_ROOT, resolve_robot_urdf("droid"))
     viz = PredictionVisualizer(cfg, urdf_path=urdf)
     print(f"[official-viz] launching viewer on http://localhost:{args.viewer_port} ...", flush=True)
-    viz.visualize(sample, launch_viewer=True)
+    result = viz.visualize(sample, launch_viewer=True)
+    # visualize() builds the scene + starts the viser server inside a live_session, then RETURNS.
+    # The eval harness normally blocks on input() to keep it alive; standalone we must hold the
+    # process open ourselves or the server stops immediately.
+    import time
+    print(f"[official-viz] viewer READY at http://localhost:{args.viewer_port} — holding open "
+          f"(Ctrl-C to stop). live_session={type(result.get('live_session')).__name__}", flush=True)
+    try:
+        while True:
+            time.sleep(3600)
+    except KeyboardInterrupt:
+        print("[official-viz] stopped.", flush=True)
 
 
 if __name__ == "__main__":
