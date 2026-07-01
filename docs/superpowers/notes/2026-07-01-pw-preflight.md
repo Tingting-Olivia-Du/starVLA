@@ -125,3 +125,12 @@ dim is `scene_flows(3)+scene_colors(3)+scene_normals(3)+gripper_open(T)+dist2rob
 at T=11 (was 25 at T=8, a shape-mismatch crash). robot_features=16 is T-independent
 (flows3+colors3+normals3+gripper1+vel3+accel3). This T=11 is fixed by the checkpoint; the probe
 and cache both use horizon=11 and read out the 10 predicted future frames.
+
+## 9. Official viz deps (visualization/prediction_viz)
+
+Added to pw_extra_site for PointWorld's official viser visualizer: open3d 0.19.0 (used only for
+PointCloud+KDTreeFlann geometry, but its eager `import open3d.visualization.draw_plotly` pulls
+plotly+dash), dash (+deps), scikit-learn+joblib+threadpoolctl. Entry: `tools/pw_official_viz.py`
+drives `PredictionVisualizer.visualize()` via `build_sample_from_dictionary(sample_dict, predictions)`
+— our bridge data_dict maps 1:1 (cam0_* keys, scene_flows/colors/robot_flows/joints), teacher
+imagined scene_flows fed as `predictions`. Run from PointWorld root (URDF + assets are repo-relative).
