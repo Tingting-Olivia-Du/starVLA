@@ -27,7 +27,7 @@ def main():
 
     from libero.libero.envs import OffScreenRenderEnv
     from robosuite.utils.camera_utils import (
-        get_camera_intrinsic_matrix, get_camera_extrinsic_matrix)
+        get_camera_intrinsic_matrix, get_camera_extrinsic_matrix, get_camera_segmentation)
 
     cams = args.cameras.split(",")
     with h5py.File(args.hdf5, "r") as f:
@@ -45,16 +45,21 @@ def main():
     assert os.path.exists(bddl), f"bddl not found: {bddl}"
 
     # OffScreenRenderEnv sets controller/robot internally; only pass bddl + camera config.
+    # camera_segmentations="instance" -> per-pixel object id for EXACT point-to-object assignment.
     kw = dict(bddl_file_name=bddl, camera_names=cams, camera_depths=True,
-              camera_heights=args.img, camera_widths=args.img)
+              camera_heights=args.img, camera_widths=args.img,
+              camera_segmentations="instance")
     env = OffScreenRenderEnv(**kw)
     env.reset()
     sim = env.env.sim
 
     ti = np.linspace(0, F - 1, args.horizon).round().astype(int)
-    frames = {c: {"rgb": [], "depth": []} for c in cams}
+    frames = {c: {"rgb": [], "depth": [], "seg": []} for c in cams}
     obj_names = [n for n in sim.model.body_names if n not in ("world", "table")]
     obj_poses = []  # per-timestep {body: 4x4}
+    # instance-seg id -> body-name map (robosuite instance seg ids index a per-env instance list;
+    # we map via geom_bodyid so each seg id resolves to the MuJoCo body it belongs to).
+    seg_id_to_body = {}
 
     # camera K/E are static (agentview) or per-frame (wrist) — capture per timestep to be safe
     Ks = {c: [] for c in cams}
@@ -71,7 +76,7 @@ def main():
         rgb = obs[f"{cam}_image"]                       # [H,W,3] (flipped later by adapter)
         return rgb, metric.astype(np.float32)
 
-    for t in ti:
+    for fi, t in enumerate(ti):
         sim.set_state_from_flattened(states[t])
         sim.forward()
         for c in cams:
@@ -80,6 +85,15 @@ def main():
             frames[c]["depth"].append(dep)
             Ks[c].append(get_camera_intrinsic_matrix(sim, c, args.img, args.img))
             Es[c].append(get_camera_extrinsic_matrix(sim, c))  # camera->world (4x4)
+            # per-pixel body-id map for EXACT point-to-object assignment (all frames; we use t=0
+            # for binding but store all so either can be used). seg[...,1]=geom_id -> geom_bodyid.
+            geom_seg = get_camera_segmentation(sim, c, args.img, args.img)[..., 1]
+            body_seg = np.full(geom_seg.shape, -1, np.int32)
+            for g in np.unique(geom_seg):
+                if g < 0:
+                    continue
+                body_seg[geom_seg == g] = int(sim.model.geom_bodyid[g])
+            frames[c]["seg"].append(body_seg)
         poses = {}
         for b in obj_names:
             bid = sim.model.body_name2id(b)
@@ -89,12 +103,21 @@ def main():
             poses[b] = T
         obj_poses.append(poses)
 
-    save = {"ti": ti, "obj_names": np.array(obj_names, dtype=object)}
+    # body-id -> name map (for resolving seg ids to object names downstream)
+    all_bids = set()
+    for c in cams:
+        for s in frames[c]["seg"]:
+            all_bids.update(int(b) for b in np.unique(s) if b >= 0)
+    bodyid_names = {int(b): sim.model.body_id2name(int(b)) for b in all_bids}
+
+    save = {"ti": ti, "obj_names": np.array(obj_names, dtype=object),
+            "bodyid_to_name": np.array(json.dumps(bodyid_names), dtype=object)}
     for c in cams:
         save[f"{c}_rgb"] = np.stack(frames[c]["rgb"], 0)          # [T,H,W,3]
         save[f"{c}_depth"] = np.stack(frames[c]["depth"], 0)      # [T,H,W] metric
         save[f"{c}_K"] = np.stack(Ks[c], 0)                       # [T,3,3]
         save[f"{c}_E_cam2world"] = np.stack(Es[c], 0)             # [T,4,4]
+        save[f"{c}_seg_bodyid"] = np.stack(frames[c]["seg"], 0)   # [T,H,W] body id per pixel
     # object poses as [T, n_obj, 4,4]
     save["obj_poses"] = np.stack([np.stack([obj_poses[i][b] for b in obj_names], 0)
                                   for i in range(len(ti))], 0)
