@@ -54,6 +54,8 @@ def build_official_sample_dict(builder, geo, teacher, hdf5):
         "scene_flows": dd["scene_flows"],          # GT-slot = static init (no GT scene track on LIBERO)
         "scene_colors": colors,
         "scene_exists": dd["scene_exists"],
+        # all reconstructed points are "supervised" for viz purposes (no data-branch drop mask)
+        "scene_supervised_mask": np.ones_like(dd["scene_exists"], dtype=bool),
         "robot_flows": dd["robot_flows"],
         "robot_exists": dd["robot_exists"],
         "joint_positions": joints[:T_MODEL],
@@ -74,6 +76,7 @@ def main():
     ap.add_argument("--libero-glob", required=True)
     ap.add_argument("--episode-index", type=int, default=0)
     ap.add_argument("--viewer-port", type=int, default=8080)
+    ap.add_argument("--rebuild", action="store_true", help="force re-run models even if cache exists")
     args = ap.parse_args()
 
     os.chdir(_PW_ROOT)  # official viz + URDF paths are repo-root-relative
@@ -86,10 +89,24 @@ def main():
     hdf5 = files[args.episode_index]
     print(f"[official-viz] episode: {os.path.basename(hdf5)}", flush=True)
 
-    geo = VGGTGeometryProvider(device="cuda")
-    builder = LiberoDataDictBuilder(domain="droid", device="cuda")
-    teacher = PointWorldTeacher(args.ckpt, ptv3_size="large", domain="droid", device="cuda")
-    sample_dict, predictions, name = build_official_sample_dict(builder, geo, teacher, hdf5)
+    # Cache the built sample_dict+predictions so viz iterations skip the ~3min model reload.
+    cache = f"/workspace/tingting/.tmp/official_viz_sample_ep{args.episode_index}.npz"
+    if os.path.exists(cache) and not args.rebuild:
+        print(f"[official-viz] loading cached sample from {cache}", flush=True)
+        z = np.load(cache, allow_pickle=True)
+        sample_dict = {k: z[k] for k in z.files if k != "__pred_scene_flows__"}
+        sample_dict["__domain__"] = "droid"
+        sample_dict["joint_names"] = [f"panda_joint{i}" for i in range(1, 8)]
+        predictions = {"scene_flows": z["__pred_scene_flows__"]}
+    else:
+        geo = VGGTGeometryProvider(device="cuda")
+        builder = LiberoDataDictBuilder(domain="droid", device="cuda")
+        teacher = PointWorldTeacher(args.ckpt, ptv3_size="large", domain="droid", device="cuda")
+        sample_dict, predictions, name = build_official_sample_dict(builder, geo, teacher, hdf5)
+        savez = {k: v for k, v in sample_dict.items() if isinstance(v, np.ndarray)}
+        savez["__pred_scene_flows__"] = predictions["scene_flows"]
+        np.savez(cache, **savez)
+        print(f"[official-viz] cached sample -> {cache}", flush=True)
 
     sample = build_sample_from_dictionary(sample_dict=sample_dict, predictions=predictions)
     cfg = PredictionVisualizerConfig()
