@@ -1,23 +1,33 @@
-# [LangPointWorld] Standalone imagine smoke: real LIBERO -> VGGT -> teacher -> flow.
+# [LangPointWorld] Full imagine smoke: LIBERO -> VGGT -> bridge data_dict -> teacher -> flow.
 import numpy as np, h5py, sys
 from starVLA.model.modules.langpw.vggt_geometry import VGGTGeometryProvider
 from starVLA.model.modules.langpw.libero_camera_adapter import build_pw_sample
+from starVLA.model.modules.langpw.libero_to_datadict import LiberoDataDictBuilder
 from starVLA.model.modules.langpw.pointworld_teacher import PointWorldTeacher
 
 HDF5 = sys.argv[1]
 CKPT = sys.argv[2]
-print("[smoke] loading VGGT ...", flush=True)
+HORIZON = 8
+print("[smoke] VGGT ...", flush=True)
 g = VGGTGeometryProvider(device="cuda")
 dp = g.depth_provider(HDF5, "demo_0")
 K, E = g.intrinsics_extrinsics(HDF5, "demo_0", 0)
 s = build_pw_sample(HDF5, "demo_0", 0, depth_provider=dp, domain="droid", intrinsics=K, extrinsics=E)
-print("[smoke] sample keys:", sorted(s.keys()), flush=True)
 with h5py.File(HDF5, "r") as f:
-    actions = np.asarray(f["data"]["demo_0"]["actions"][0:8], np.float64)
-print("[smoke] loading teacher ...", flush=True)
+    obs = f["data"]["demo_0"]["obs"]
+    joints = np.asarray(obs["joint_states"][:], np.float64)
+    grip = np.asarray(obs["gripper_states"][:], np.float64)
+print("[smoke] bridge (FK + unproject) ...", flush=True)
+b = LiberoDataDictBuilder(domain="droid", device="cuda")
+dd = b.build(s, joints, grip, horizon=HORIZON)
+print("[smoke] data_dict scene_flows", dd["scene_flows"].shape, "robot_flows", dd["robot_flows"].shape, flush=True)
+print("[smoke] teacher ...", flush=True)
 t = PointWorldTeacher(CKPT, ptv3_size="large", domain="droid", device="cuda")
-print("[smoke] running imagine ...", flush=True)
-out = t.imagine(s, demo_action_chunk=actions)
+print("[smoke] imagine ...", flush=True)
+out = t.imagine_from_datadict(dd)
 sf = out["scene_flows"]
-print("=== IMAGINE OK ===", "scene_flows", tuple(sf.shape), "finite", bool(sf.isfinite().all()),
-      "coord0", tuple(out["scene_coord0"].shape), flush=True)
+print("=== IMAGINE OK ===", "scene_flows", tuple(sf.shape), "finite", bool(sf.isfinite().all()), flush=True)
+# save for inspection
+np.savez("/workspace/tingting/.tmp/imagine_out.npz",
+         scene_flows=sf.numpy(), scene_coord0=out["scene_coord0"].numpy())
+print("[smoke] saved imagine_out.npz", flush=True)

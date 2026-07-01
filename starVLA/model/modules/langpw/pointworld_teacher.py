@@ -71,18 +71,12 @@ class PointWorldTeacher:
             p.requires_grad_(False)
 
     @torch.no_grad()
-    def imagine(self, sample: dict, demo_action_chunk: np.ndarray) -> dict:
-        """sample: build_pw_sample output. demo_action_chunk: [T,action_dim].
-        Returns imagined future scene-flow in the world/camera frame."""
-        _ensure_pw_on_path()
-        from dataset_components.pipeline import apply_release_pipeline_to_sample
-        s = dict(sample)
-        s["action_chunk"] = np.asarray(demo_action_chunk, np.float64)
-        s = apply_release_pipeline_to_sample(
-            s, domain=self.domain, mode="test", args=self.args, include_scene_data=True,
-        )
+    def imagine_from_datadict(self, data_dict: dict) -> dict:
+        """data_dict: LiberoDataDictBuilder.build() output (numpy arrays + __domain__).
+        Bypasses the WDS pipeline (data-branch-only); feeds BaseModel.forward directly.
+        Returns imagined future scene-flow in the world frame."""
         batch = {}
-        for k, v in s.items():
+        for k, v in data_dict.items():
             if isinstance(v, np.ndarray):
                 batch[k] = torch.as_tensor(v).unsqueeze(0).to(self.device)
             elif k == "__domain__":
@@ -91,7 +85,7 @@ class PointWorldTeacher:
                 batch[k] = v
         out = self.model(batch, training=False)
         return {
-            "scene_flows": out["scene_flows"][0].detach().cpu(),      # [T,Ns,3]
+            "scene_flows": out["scene_flows"][0].detach().cpu(),       # [T,Ns,3]
             "scene_coord0": batch["scene_flows"][0, 0].detach().cpu(),  # [Ns,3]
         }
 
