@@ -246,8 +246,11 @@ class LiberoDataDictBuilder:
         z = sim_npz
         names = list(z["obj_names"])
         base_T = z["obj_poses"][0][names.index("robot0_base")]      # robot base -> world (t=0)
+        base_inv = np.linalg.inv(base_T)                            # world -> base
 
-        # --- multi-view scene cloud: unproject each camera's t=0 depth into the shared world frame ---
+        # Everything is expressed in the ROBOT-BASE frame (base at origin), matching the official
+        # viz's URDF mesh which is FK'd from the base origin. Scene: world -> base. Robot: keep FK
+        # points (already base frame). Camera extrinsic: base -> cam = (world->cam) @ (base->world).
         cams = tuple(cams) if isinstance(cams, (list, tuple)) else (cams,)
         per_cam = []            # payloads for PW cam0/cam1/...
         cloud_pts, cloud_cols = [], []
@@ -261,15 +264,18 @@ class LiberoDataDictBuilder:
             E_c2w = z[f"{c}_E_cam2world"][0].astype(np.float64)
             E_w2c = np.linalg.inv(E_c2w)
             pts, cols, _ = unproject_depth_to_points(depth, K, E_w2c, rgb=rgb0, max_points=per_cam_budget)
-            keep = (np.abs(pts[:, 0]) < 1.2) & (np.abs(pts[:, 1]) < 1.2) & (pts[:, 2] > -0.05) & (pts[:, 2] < 1.2)
+            # world -> base frame
+            pts = (base_inv[:3, :3] @ pts.T).T + base_inv[:3, 3]
+            keep = (np.abs(pts[:, 0]) < 1.5) & (np.abs(pts[:, 1]) < 1.2) & (pts[:, 2] > -0.05) & (pts[:, 2] < 1.2)
             cloud_pts.append(pts[keep]); cloud_cols.append(cols[keep])
-            # PW camera payload (world->cam extrinsic, resized to 180x320)
+            # PW camera payload — extrinsic must map BASE-frame points to cam: E_base2cam = E_w2c @ base_T
+            E_base2cam = E_w2c @ base_T
             rgb_p = _cv2.resize(rgb0, (_PW_HW[1], _PW_HW[0]), interpolation=_cv2.INTER_AREA)
             dep_p = _cv2.resize(depth, (_PW_HW[1], _PW_HW[0]), interpolation=_cv2.INTER_NEAREST)
             Kp = K.copy(); Kp[0, :] *= (_PW_HW[1] / depth.shape[1]); Kp[1, :] *= (_PW_HW[0] / depth.shape[0])
             per_cam.append({"rgb": rgb_p, "depth": dep_p.astype(np.float32),
-                            "K": Kp.astype(np.float64), "E": E_w2c.astype(np.float64)})
-        scene0 = np.concatenate(cloud_pts, 0)                       # merged multi-view cloud (world frame)
+                            "K": Kp.astype(np.float64), "E": E_base2cam.astype(np.float64)})
+        scene0 = np.concatenate(cloud_pts, 0)                       # merged cloud in BASE frame
         scene_colors0 = np.concatenate(cloud_cols, 0)
         Ns = scene0.shape[0]
         T = horizon
@@ -278,15 +284,12 @@ class LiberoDataDictBuilder:
         scene_colors = np.tile((np.clip(scene_colors0, 0, 1))[None], (T, 1, 1)).astype(np.float32)
         scene_normals = np.zeros((T, Ns, 3), np.float32)
 
-        # robot cloud: FK (base frame) -> world via base_T. Sample action timesteps by the SAME
-        # linspace the sim render used (z["ti"]).
+        # robot cloud: FK points are ALREADY in the base frame — keep them (no base_T transform),
+        # so they align with the official URDF mesh (also FK'd from base origin).
         ti = z["ti"]
         js = np.asarray(joint_states)[ti]; gs = np.asarray(gripper_states)[ti]
         rf_out = self._robot_flows_full(js, gs, T)
-        rf_base = rf_out["robot_flows"]                            # [T,Nr,3] base frame
-        ones = np.ones(rf_base.shape[:-1] + (1,), rf_base.dtype)
-        rf_world = np.einsum('ij,tkj->tki', base_T, np.concatenate([rf_base, ones], -1))[..., :3]
-        robot_flows = rf_world.astype(np.float32)
+        robot_flows = rf_out["robot_flows"].astype(np.float32)     # [T,Nr,3] base frame
         robot_colors, robot_normals = rf_out["robot_colors"], rf_out["robot_normals"]
         Nr = robot_flows.shape[1]
         robot_exists = np.ones((T, Nr), bool)
