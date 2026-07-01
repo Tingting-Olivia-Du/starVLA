@@ -51,7 +51,10 @@ def main():
     robot = z["robot_flows"] if "robot_flows" in z.files else None  # [T,Nr,3]
     K = z["cam0_intrinsic"].astype(np.float64)
     E = z["cam0_extrinsic"].astype(np.float64)
-    Hc, Wc = z["cam0_initial_rgb"].shape[:2]
+    if "cam0_initial_rgb" in z.files:
+        Hc, Wc = z["cam0_initial_rgb"].shape[:2]
+    else:  # official data has no decoded rgb; use depth shape for the canvas
+        Hc, Wc = z["cam0_initial_depth"].shape[:2]
     T, Ns, _ = pred.shape
     up = args.upscale
     H, W = Hc * up, Wc * up
