@@ -30,22 +30,34 @@ class PointWorldTeacher:
         from pointworld.base import BaseModel
         from pointworld.checkpoint_contract import (
             read_checkpoint_contract, apply_model_contract_to_args,
+            train_domains_from_data_contract,
         )
         self.device = device
         self.domain = domain
 
+        ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+        model_contract, data_contract = read_checkpoint_contract(ckpt, context="teacher")
+        # The checkpoint's norm_stats carry one row PER TRAINING DOMAIN — the model must be built
+        # with the SAME domain set (e.g. large-droid+behavior has 2 domains) or the norm-stat
+        # buffers mismatch. Recover the training domains from the data contract.
+        try:
+            train_domains = train_domains_from_data_contract(data_contract, context="teacher")
+        except Exception:
+            train_domains = [domain]
+        if domain not in train_domains:
+            train_domains = [domain] + [d for d in train_domains if d != domain]
+        self.train_domains = list(train_domains)
+
         # Minimal args: mimic `eval.py` invocation, then let the checkpoint contract
         # overwrite arch-defining fields so init matches the trained model exactly.
         argv_backup = sys.argv
-        sys.argv = ["eval.py", "--model_path", ckpt_path, "--domains", domain,
+        sys.argv = ["eval.py", "--model_path", ckpt_path, "--domains", ",".join(train_domains),
                     "--ptv3_size", ptv3_size, "--device", device, "--distributed", "false"]
         try:
             args = parse_args()
         finally:
             sys.argv = argv_backup
 
-        ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
-        model_contract, _data_contract = read_checkpoint_contract(ckpt, context="teacher")
         apply_model_contract_to_args(args, model_contract, context="teacher",
                                      explicit_cli_dests=set())
 
