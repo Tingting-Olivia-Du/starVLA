@@ -77,6 +77,7 @@ def main():
     ap.add_argument("--episode-index", type=int, default=0)
     ap.add_argument("--viewer-port", type=int, default=8080)
     ap.add_argument("--rebuild", action="store_true", help="force re-run models even if cache exists")
+    ap.add_argument("--urdf", default=None, help="robot URDF for mesh render (e.g. LIBERO panda_arm_hand)")
     ap.add_argument("--cache", default=None, help="explicit sample cache npz (e.g. a dual-view sample)")
     args = ap.parse_args()
 
@@ -113,7 +114,7 @@ def main():
     cfg = PredictionVisualizerConfig()
     cfg.viewer_port = args.viewer_port
     cfg.viewer_host = "0.0.0.0"
-    urdf = os.path.join(_PW_ROOT, resolve_robot_urdf("droid"))
+    urdf = args.urdf or os.path.join(_PW_ROOT, resolve_robot_urdf("droid"))
     viz = PredictionVisualizer(cfg, urdf_path=urdf)
     print(f"[official-viz] launching viewer on http://localhost:{args.viewer_port} ...", flush=True)
     result = viz.visualize(sample, launch_viewer=True)
