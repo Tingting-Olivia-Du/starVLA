@@ -141,3 +141,20 @@ proxy mismatch; (2) pilot V1 and let closed-loop success decide — a distillati
 transfer *direction* even if the teacher under-drives *magnitude* (normalize/whiten flow before
 the distill loss). Under-drive is exactly the kind of bias a magnitude-normalized distill target
 sidesteps. Still NOT a clean gate pass → not auto-training.
+
+## 2026-07-02 — 诊断闭环 + 决定性对照(domain gap 实锤)
+
+用户连问 EEF/proprio + 可视化 flow 飘,引出完整根因链,最终用官方数据对照实锤:
+
+**根因链(全部验证):**
+1. PW 不吃 EEF/proprio,机器人=无标签点云(用户直觉对)
+2. flow 飘 = VGGT场景点云 与 FK机械臂点 坐标系脱节(场景z→2.0, 臂悬在0.2, 距离0.44)
+3. 修复:LIBERO sim 渲染真米制深度+真K/E+object poses(libero env)→ build_from_sim → 机械臂站进场景(距离0.44→0.031), flow从臂发出
+4. 残留:被抓物体 PW预测0.009 但 GT位移0.484 → 怀疑漏抓取
+5. **决定性对照:官方 BEHAVIOR 数据上 PW l2=0.00106(毫米级),LIBERO ~0.25(差200倍)**
+
+**结论:PW 模型优秀(in-domain 毫米级),pipeline已修对,唯一问题=LIBERO domain gap。**
+
+**官方数据结构(下载验证):** scene_flow = per-object mesh点 × GT位姿轨迹(致密干净,被操作物体一定有flow)。我们LIBERO=深度反投影+PW预测(不准)。
+
+**V1 正解(现在well-grounded):微调 PW on LIBERO。** 条件已具备:sim-render 出 per-object 6D poses + 米制深度 → 可做成官方格式(per-object mesh点 × GT位姿轨迹)微调数据。微调后 teacher 在 LIBERO 准 → 蒸馏。工具: tools/pw_sim_render.py, tools/pw_official_viz.py; 官方数据 /workspace/tingting/pw_official_data/; data分支 /workspace/tingting/PointWorld-data。
