@@ -85,3 +85,34 @@ PointWorld pipeline asserts camera payload `(180, 320)`; LIBERO is 128×128. Ada
   (NOT `load_norm_stats` as the plan guessed). Use `stats/droid` folder (present in repo).
 - Model build path is `BaseModel(args, data_info_dict, rank)`; real build+load sequence is in
   `evaluation/tester.py:__init__` (torch.load `weights_only=False`, key `model`) — mirror it.
+
+## 7. CRITICAL ARCHITECTURAL FINDING — PointWorld consumes preprocessed points, not RGB-D
+
+Discovered while wiring `imagine()`. **PointWorld's `main` branch does NOT unproject RGB-D.**
+`apply_release_pipeline_to_sample` and `sample_cameras` both *assume the sample already contains*
+`<cam>_scene_flows` — full-scene 3D point **trajectories** `(T,N,3)` computed OFFLINE by the
+`data` branch via **mesh + per-timestep object-pose tracking** (`decoders.py:transform_points_kernel`
+transforms local mesh points by GT object poses). This is GT scene tracking, NOT monocular depth
+unprojection. The `data` branch (which does this) is a separate branch, not checked out.
+
+**Consequence for the probe (the bridge in `libero_to_datadict.py`):** BaseModel.forward only
+*conditions* on `scene_flows[:,0]` (t=0 cloud) + `robot_flows` (all T); the future scene frames
+are what it PREDICTS. So the minimal runnable data_dict is:
+- `scene_flows[:,0]` = t=0 cloud via **VGGT-depth unprojection** (K^-1 backproject + E^-1 to world);
+  future frames = dummy zeros (predicted output). Feature encoding (DINOv3) is computed inside
+  forward from this cloud + the camera RGB.
+- `robot_flows[T,Nr,3]` = FK over the demo joint trajectory via PointWorld `RobotSampler`
+  (`_get_robot_flows_droid`, needs `joint_positions[T,7]` + `gripper_positions[T]`, droid Franka
+  URDF). LIBERO: `joint_states[T,7]` + `gripper_states[T,2]` (mean → single finger proxy).
+
+**Implication for V1 distillation (not just probe):** the teacher's "scene_flows" targets on
+LIBERO will be depth-unprojected clouds propagated by the model, NOT GT mesh-tracked trajectories
+like DROID/BEHAVIOR training data. This is an ADDITIONAL domain-gap axis on top of robot/camera.
+The PW-PROBE gate measures exactly this — if the teacher's imagined flow on VGGT-depth LIBERO
+clouds doesn't track GT (EE-trajectory proxy), the gate fails and we branch per spec §4. This is
+the single biggest open risk and is precisely what the gate exists to answer cheaply.
+
+**Status at handoff:** teacher loads (1288M), VGGT geometry works, all 6 langpw unit modules
+pass (18 tests). The `libero_to_datadict` bridge is written but the exact camera_data key naming
+the DINOv3 featurizer expects (`_extract_camera_data`) still needs a GPU iteration to pin — this
+is the next concrete step to a real imagine() forward, then the gate verdict.
