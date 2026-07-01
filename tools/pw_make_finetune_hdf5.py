@@ -56,6 +56,26 @@ def main():
     roles = np.array([role(name_by_bid.get(int(b), "")) for b in body])
     keep = roles != "robot"                                # drop robot (action, not scene)
     Pw0, body, cols, roles = Pw0[keep], body[keep], cols[keep], roles[keep]
+
+    # Per-object OUTLIER FILTER: seg-assigned object points at depth-discontinuity / occlusion
+    # edges can back-project off the object (~9% were >12cm, up to 0.25m). Drop points beyond a
+    # robust radius (median + k*MAD, floored) from that object's t=0 center. Cleans the GT without
+    # changing its rigid-body definition.
+    drop = np.zeros(len(Pw0), bool)
+    for bid in np.unique(body):
+        nm = name_by_bid.get(int(bid), "")
+        if role(nm) != "obj":
+            continue
+        m = body == bid
+        ctr = op[0][name2idx[nm]][:3, 3]
+        d = np.linalg.norm(Pw0[m] - ctr, axis=-1)
+        med = np.median(d); mad = np.median(np.abs(d - med)) + 1e-6
+        thr = max(0.10, med + 4.0 * mad)                   # robust radius, >=10cm floor
+        idx = np.where(m)[0]
+        drop[idx[d > thr]] = True
+    keep2 = ~drop
+    n_drop = int(drop.sum())
+    Pw0, body, cols, roles = Pw0[keep2], body[keep2], cols[keep2], roles[keep2]
     # subsample keeping all object points
     if len(Pw0) > args.max_points:
         oi = np.where(roles == "obj")[0]; bi = np.where(roles != "obj")[0]
