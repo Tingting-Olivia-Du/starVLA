@@ -35,8 +35,12 @@ def main():
     E_c2w = z[f"{args.cam}_E_cam2world"]; seg = z[f"{args.cam}_seg_bodyid"]
     H0, W0 = depth.shape[1:]
 
-    # t=0 unproject -> world points + seg assignment
-    d0 = depth[0][::-1, :]; rgb0 = rgb[0][::-1, :, :]; seg0 = seg[0][::-1, :]
+    # t=0 unproject -> world points + seg assignment.
+    # CRITICAL flip contract (verified: object centroid aligns to sim object center only this way):
+    # depth+rgb are opengl-flipped (need [::-1] for correct y-up unprojection), but the segmentation
+    # from get_camera_segmentation is aligned to the UN-flipped image — so seg must NOT be flipped.
+    # both-flip gave centroid offset 0.173, depth-flip-only gave 0.038 (correct).
+    d0 = depth[0][::-1, :]; rgb0 = rgb[0][::-1, :, :]; seg0 = seg[0]           # seg NOT flipped
     ys, xs = np.nonzero(np.isfinite(d0) & (d0 > 1e-4) & (d0 < 5))
     zz = d0[ys, xs]; K0 = K[0]; fx, fy, cx, cy = K0[0, 0], K0[1, 1], K0[0, 2], K0[1, 2]
     pc = np.stack([(xs - cx) / fx * zz, (ys - cy) / fy * zz, zz], -1)
