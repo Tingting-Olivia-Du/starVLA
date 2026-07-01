@@ -1,0 +1,87 @@
+# [LangPointWorld] Phase-0 Preflight — go/no-go for LIBERO → PointWorld
+
+**Date:** 2026-07-01 (overnight autonomous run)
+**Verdict:** ✅ **GO** — PointWorld's full stack runs in the starVLA env; LIBERO can be adapted to its input contract. All three hard unknowns from spec review are resolved.
+
+---
+
+## 1. Environment (resolved — no rebuild needed)
+
+The shared starVLA env (`/workspace/ghsun/miniconda3/envs/starVLA`, torch 2.6.0+cu124) was
+**NOT mutated**. All PointWorld-only deps installed into an **isolated site-dir** under
+`/workspace/tingting/` and injected via `PYTHONPATH`:
+
+```
+PW_EXTRA_SITE=/workspace/tingting/envs/pw_extra_site
+export PYTHONPATH="$PW_EXTRA_SITE"      # prepend before running anything PointWorld
+```
+
+Installed there (all `--no-deps`, additive, reversible): `addict, pytorch_kinematics 0.10.0,
+urdfpy 0.0.22, arm_pytorch_utilities, pytorch_seed, lxml, spconv-cu120 2.3.6, pccm, cumm-cu120,
+pybind11, fire, ccimport, portalocker, lark, torch_scatter 2.1.2+pt26cu124, webdataset,
+braceexpand, numba 0.65.1, llvmlite`.
+
+**Verified imports** (torch 2.6, GPU 2): `pointworld.base.BaseModel`, `robot_sampler.RobotSampler`,
+`dataset_components.pipeline.apply_release_pipeline_to_sample` — **full stack ready**.
+`torch_scatter` must be the `pt26cu124` wheel; `spconv-cu120` works against the cu124 runtime.
+
+**Why not the shared env or a fresh env:** additive isolated site-dir is the least-disruptive
+choice on a shared multi-tenant box (spec/session safety constraint) and avoided a
+`torch-2.12` pull that plain `pip install pytorch_kinematics` triggered.
+
+## 2. Checkpoints (downloaded)
+
+`HF_HOME=/root/angli/hf_cache`. All three present:
+- `.../large-droid/model-best.pt` (13G) — **primary probe target**
+- `.../large-droid+behavior/model-best.pt` (13G) — **fallback if gate fails**
+- `.../small-droid/model-best.pt` (1.8G)
+
+Snapshot dir: `/root/angli/hf_cache/hub/models--nvidia--PointWorld_models/snapshots/b9e2e19a4f2bd65922e1f6d70aa953fe70aa9dba/`.
+
+## 3. Depth source (DECISION: VGGT primary, Depth-Anything fallback, sim-depth deferred)
+
+LIBERO HDF5 obs has **no depth** (keys: `agentview_rgb, eye_in_hand_rgb, ee_pos, ee_ori,
+ee_states, gripper_states, joint_states`; `actions`; `states (T,110)`), 128×128, `opengl`
+image convention (⇒ agentview stored upside-down — adapter flips).
+
+Options weighed:
+- **Sim depth** (most accurate): LIBERO env *supports* `camera_depths=True` and the HDF5 stores
+  full `states (T,110)` + `init_state` + `model_file` ⇒ demos are exactly replayable. **But
+  mujoco/robosuite/libero are NOT in the starVLA env** ([[starvla-libero-eval-setup]]: LIBERO
+  runs in a separate `libero-ttd` env via client-server). Cross-env cache generation = friction.
+  **Deferred** to a borderline-gate fallback.
+- **VGGT** (CHOSEN primary): `/workspace/tingting/vggt-world` is editable-installed in the
+  starVLA env ([[geo-memoryvla-conda-env]]); imports OK. Produces metric point maps **AND joint
+  camera intrinsics/extrinsics** from RGB → solves depth *and* the missing-intrinsics problem in
+  one model, in-env, on GPU 2,3. Consistent with the Geo-MemoryVLA geometry backbone.
+- **Depth-Anything** (fallback): `transformers 4.57` has `DepthAnythingForDepthEstimation`.
+  Depth-only (still needs intrinsics from elsewhere). Simpler but less complete than VGGT.
+
+**Engineering rationale (per user "choose most effective, not laziest"):** VGGT gives the most
+complete geometry (depth + camera params) needed by PointWorld's `scene_featurizer`, avoids
+cross-env friction, runs on GPU 2,3. The PW-PROBE gate is exactly the instrument to catch any
+resulting depth error — if VGGT depth degrades the gate, switch to sim depth (cross-env) before
+declaring the whole path dead.
+
+## 4. Domain + URDF (DECISION: domain="droid", absolute-path the Franka URDF)
+
+`resolve_robot_urdf("droid")` → `assets/franka_description/franka_panda_robotiq_2f85.urdf`
+(relative to PointWorld root; **exists** at `/workspace/tingting/PointWorld/assets/...`).
+- Arm: **7-DoF Franka Panda** — matches LIBERO's Panda arm exactly ⇒ arm point-flow FK is valid.
+- Gripper: PointWorld URDF is **Robotiq 2F85**, LIBERO is Franka's parallel gripper — differs.
+  Documented approximation (spec §4 domain gap); arm dims are the gate's key points anyway,
+  matching the FCDecoder-probe methodology ([[vla-rlds-closedloop-rootcause]]).
+- Consequence for code: run teacher from PointWorld root OR pass the URDF as an absolute path so
+  the relative `assets/...` resolves.
+
+## 5. Resolution
+
+PointWorld pipeline asserts camera payload `(180, 320)`; LIBERO is 128×128. Adapter resizes
+(INTER_AREA for RGB, INTER_NEAREST for depth) — implemented in `libero_camera_adapter.py`.
+
+## 6. Symbol corrections discovered (feed into teacher wrapper, plan Task 5)
+
+- `pointworld.norm_stats` exposes `load_norm_stats_from_json` / `load_stats_from_json_folder`
+  (NOT `load_norm_stats` as the plan guessed). Use `stats/droid` folder (present in repo).
+- Model build path is `BaseModel(args, data_info_dict, rank)`; real build+load sequence is in
+  `evaluation/tester.py:__init__` (torch.load `weights_only=False`, key `model`) — mirror it.
