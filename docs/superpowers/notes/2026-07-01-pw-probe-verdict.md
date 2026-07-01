@@ -41,9 +41,56 @@ env (absent from the starVLA env) to decode. Deferred; flagged as the right next
 most — measuring "does the model's predicted motion track GT arm/object motion" (the right
 question). Running on BOTH `large-droid` and `large-droid+behavior` (spec §4 fallback).
 
-### Live results (filled by the running probe_both.sh)
-- large-droid (motion): results/pw_probe_motion/probe_result.json
-- large-droid+behavior (motion): results/pw_probe_behavior/probe_result.json
+### FINAL corrected results
+
+**large-droid (motion-mode): corr_mean = 0.48 — BORDERLINE (below 0.7, but real signal).**
+corr_x=0.69, corr_y=0.43, corr_z=0.32; l2_mean=0.050. Pred/GT magnitudes now well-matched
+(~0.02 vs ~0.01 — no under-drive). Per-episode split is the key finding:
+
+| ep | corr_mean | pred\|.\| | gt\|.\| | reads as |
+|----|-----------|-----------|---------|----------|
+| ep0 | **0.99** | 0.027 | 0.023 | strong track |
+| ep6 | **0.85** | 0.025 | 0.015 | strong track |
+| ep7 | **0.81** | 0.020 | 0.012 | strong track |
+| ep1 | 0.38 | 0.014 | 0.008 | weak |
+| ep4 | 0.37 | 0.026 | 0.011 | weak |
+| ep3 | 0.11 | 0.018 | 0.008 | none |
+| ep5 | -0.11 | 0.022 | 0.007 | anti |
+| ep2 | -0.16 | 0.017 | 0.011 | anti |
+
+**Interpretation:** the teacher captures real LIBERO manipulation dynamics on ~half the episodes
+(strong, magnitude-matched tracking) and fails on the other half. This is NOT a dead teacher and
+NOT under-drive — it is *partial* transfer, exactly the borderline the spec anticipated. The
+noisy half is plausibly dominated by the **EE-motion-vs-scene-motion proxy mismatch** (§ caveat
+above): scene flow ≠ arm motion, so episodes where the object barely moves until late contact
+score poorly against an EE-motion GT even if the scene prediction is fine.
+
+**large-droid+behavior (fallback): NOT EVALUATED — feature-layout incompatible.** It loads (after
+the multi-domain norm-stats fix) but expects **42-dim** scene features (BEHAVIOR bimanual layout)
+vs the 31-dim droid layout the bridge builds → per-episode dim-mismatch crash. Matching the 42-dim
+BEHAVIOR feature composition is a bounded but non-trivial follow-up; deferred (large-droid is the
+DROID-native, correct-feature checkpoint for a Franka-arm LIBERO probe anyway).
+
+## FINAL branch decision (autonomous run)
+
+**Gate = BORDERLINE, treated as NOT-a-clean-PASS → DID NOT start V0/V1 training.** This honors the
+spec kill-criterion (don't train on a gate that didn't clearly pass) and the user's constraint to
+not burn GPU-hours speculatively. The full V1 pipeline is built, tested, and ready to run the
+moment the gate is cleared.
+
+**Recommended next steps (ranked), for the user's return:**
+1. **Object-pose GT probe (the rigorous fix).** Replace the EE-motion GT proxy with per-object
+   3D motion from LIBERO sim object poses. Needs the `libero-ttd`/robosuite env (not in starVLA
+   env) to decode object qpos from the 110-dim MuJoCo `states`, or to re-render with object
+   segmentation. This directly tests "does teacher scene-flow track object motion" — the actual
+   V1 supervision signal — and likely lifts corr well above the EE proxy on the strong episodes.
+2. **Pilot V1 at a relaxed bar.** The 3 strong episodes (corr 0.8–0.99) show the teacher gives
+   genuinely useful flow on many samples. A small pilot: build the cache, train V1 vs V0 on the
+   libero_object suite, and let the CLOSED-LOOP success-rate delta be the real arbiter (the gate
+   is a cheap proxy; the true test is whether distillation helps the policy). Weight the distill
+   loss by per-sample teacher confidence so noisy-teacher samples contribute less.
+3. **Fix the 42-dim BEHAVIOR feature layout** and probe large-droid+behavior — sim-trained
+   BEHAVIOR may transfer to LIBERO-sim better than real-DROID.
 
 ## Branch decision (per spec §4) — pending corrected results
 
