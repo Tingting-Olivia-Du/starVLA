@@ -217,6 +217,7 @@ class LiberoDataDictBuilder:
             "scene_flows": scene_flows.astype(np.float32),
             "scene_features": scene_features.astype(np.float32),
             "scene_exists": scene_exists,
+            "scene_supervised_mask": np.ones((T, Ns), dtype=bool),
             "robot_flows": robot_flows.astype(np.float32),
             "robot_features": feat_sample["robot_features"].astype(np.float32),
             "robot_exists": robot_exists,

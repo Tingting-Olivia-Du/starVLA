@@ -77,6 +77,7 @@ def main():
     ap.add_argument("--episode-index", type=int, default=0)
     ap.add_argument("--viewer-port", type=int, default=8080)
     ap.add_argument("--rebuild", action="store_true", help="force re-run models even if cache exists")
+    ap.add_argument("--cache", default=None, help="explicit sample cache npz (e.g. a dual-view sample)")
     args = ap.parse_args()
 
     os.chdir(_PW_ROOT)  # official viz + URDF paths are repo-root-relative
@@ -90,7 +91,7 @@ def main():
     print(f"[official-viz] episode: {os.path.basename(hdf5)}", flush=True)
 
     # Cache the built sample_dict+predictions so viz iterations skip the ~3min model reload.
-    cache = f"/workspace/tingting/.tmp/official_viz_sample_ep{args.episode_index}.npz"
+    cache = args.cache or f"/workspace/tingting/.tmp/official_viz_sample_ep{args.episode_index}.npz"
     if os.path.exists(cache) and not args.rebuild:
         print(f"[official-viz] loading cached sample from {cache}", flush=True)
         z = np.load(cache, allow_pickle=True)
