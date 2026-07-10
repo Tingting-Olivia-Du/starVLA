@@ -161,6 +161,27 @@ class VLAMTrainer(TrainerUtils):
         if pretrained_checkpoint and is_resume:
             self._load_checkpoint(self.config.resume_from_checkpoint)
 
+        # [3DVLA] Seamless resume: restores model + DeepSpeed/ZeRO optimizer
+        # shards + registered lr scheduler + RNG (accelerate save_state
+        # counterpart in _save_checkpoint). Weights-only warm starts reset
+        # Adam moments and re-peak the lr, which transiently collapses the
+        # most recently acquired capability axes (observed: T7 83->56->88).
+        # The lr scheduler must be registered BEFORE load_state to be restored.
+        self.accelerator.register_for_checkpointing(self.lr_scheduler)
+        resume_state = getattr(self.config.trainer, "resume_state", None)
+        self._resume_skip_batches = 0
+        if resume_state:
+            self.accelerator.load_state(resume_state)
+            meta_path = os.path.join(resume_state, "resume_meta.json")
+            with open(meta_path) as fh:
+                meta = json.load(fh)
+            self.completed_steps = int(meta["completed_steps"])
+            # data stream: same annotation file, skip already-consumed batches
+            self._resume_skip_batches = self.completed_steps
+            self.accelerator.print(
+                f"🔁 Seamless resume from {resume_state}: step {self.completed_steps}, "
+                f"skipping {self._resume_skip_batches} consumed batches")
+
     def _load_checkpoint(self, checkpoint_path):
         """Load checkpoint."""
         self.accelerator.load_state(checkpoint_path)
@@ -195,6 +216,44 @@ class VLAMTrainer(TrainerUtils):
 
         self.accelerator.wait_for_everyone()
 
+        # [3DVLA] Full training-state snapshot for seamless resume — explicit
+        # OPT-IN switch `trainer.save_resume_state` (default OFF; ~60GB per
+        # snapshot for a 4B model). ALL ranks must call save_state (DeepSpeed
+        # writes per-rank ZeRO optimizer shards). Rotation deletes the OLD
+        # snapshot BEFORE saving the new one: keep-1 disk peak stays ~60GB
+        # instead of ~120GB (this box cannot afford the latter); the brief
+        # no-snapshot window during the save is covered by the weights-only
+        # checkpoint saved above. A free-space guard skips (never crashes)
+        # the snapshot when the disk cannot hold it.
+        if getattr(self.config.trainer, "save_resume_state", False):
+            import shutil
+            state_dir = os.path.join(self.checkpoint_dir, f"state_{self.completed_steps}")
+            if self.accelerator.is_main_process:
+                for d in Path(self.checkpoint_dir).glob("state_*"):
+                    if d.is_dir() and d.name != f"state_{self.completed_steps}":
+                        shutil.rmtree(d, ignore_errors=True)
+            self.accelerator.wait_for_everyone()
+            # decide on rank0 and broadcast: per-rank disk reads can disagree
+            # at the threshold edge, and save_state is a collective op — a
+            # split decision would deadlock the ranks.
+            from accelerate.utils import broadcast_object_list
+            min_gb = float(getattr(self.config.trainer, "resume_state_min_free_gb", 70))
+            decision = [False]
+            if self.accelerator.is_main_process:
+                free_gb = shutil.disk_usage(self.checkpoint_dir).free / 1e9
+                decision = [free_gb >= min_gb]
+                if not decision[0]:
+                    print(f"⚠️ resume-state snapshot SKIPPED: {free_gb:.0f}GB free < "
+                          f"{min_gb:.0f}GB required (weights-only checkpoint still saved)")
+            broadcast_object_list(decision, from_process=0)
+            if decision[0]:
+                self.accelerator.save_state(state_dir)
+                if self.accelerator.is_main_process:
+                    with open(os.path.join(state_dir, "resume_meta.json"), "w") as fh:
+                        json.dump({"completed_steps": self.completed_steps}, fh)
+                    self.accelerator.print(f"💾 Resume state saved at {state_dir}")
+            self.accelerator.wait_for_everyone()
+
     def _log_metrics(self, metrics):
         """Record training metrics."""
         if self.completed_steps % self.config.trainer.logging_frequency == 0 and dist.get_rank() == 0:
@@ -211,7 +270,16 @@ class VLAMTrainer(TrainerUtils):
 
     def _create_data_iterators(self):
         """Create data iterators."""
-        self.vlm_iter = iter(self.vlm_train_dataloader)
+        # [3DVLA] On seamless resume, fast-skip the batches this rank already
+        # consumed (index-level skip, no image loading) so the data stream
+        # continues exactly where the snapshot left off — first epoch only.
+        if getattr(self, "_resume_skip_batches", 0):
+            from accelerate import skip_first_batches
+            self.vlm_iter = iter(skip_first_batches(self.vlm_train_dataloader,
+                                                    self._resume_skip_batches))
+            self._resume_skip_batches = 0
+        else:
+            self.vlm_iter = iter(self.vlm_train_dataloader)
 
     def _get_next_batch(self):
         """Get next batch (automatically handle data loop)."""

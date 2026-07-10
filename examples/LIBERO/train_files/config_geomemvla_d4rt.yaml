@@ -100,7 +100,7 @@ trainer:
   weight_decay: 0.0
   logging_frequency: 10
   gradient_clipping: 1.0
-  gradient_accumulation_steps: 8
+  gradient_accumulation_steps: 1
   gradient_checkpointing: true
   optimizer:
     name: AdamW

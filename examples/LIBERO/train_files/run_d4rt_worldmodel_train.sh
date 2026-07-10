@@ -17,7 +17,7 @@ export HF_HUB_ENABLE_HF_TRANSFER=0
 # ~25 GiB at bs=4 (was 124 GiB -> OOM). This is belt-and-suspenders against fragmentation.
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
 # [D4RT-WorldState] GPUs 0,1 per user request (override by exporting CUDA_VISIBLE_DEVICES).
-export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1}"
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,4,5}"
 
 # [Geo-MemoryVLA] /tmp is a SMALL 30G disk — route temp/scratch to the big rootfs disk.
 BIGTMP=/workspace/tingting/.bigtmp
@@ -77,11 +77,11 @@ accelerate launch \
   --framework.imagination.subgoal_type latent \
   --datasets.vla_data.data_root_dir "${libero_data_root}" \
   --datasets.vla_data.data_mix ${data_mix} \
-  --datasets.vla_data.per_device_batch_size 4 \
+  --datasets.vla_data.per_device_batch_size 16 \
   --datasets.vla_data.sequential_step_sampling True \
   --datasets.vla_data.enable_image_window True \
-  --trainer.max_train_steps 80000 \
-  --trainer.save_interval 10000 \
+  --trainer.max_train_steps 50000 \
+  --trainer.save_interval 4000 \
   --trainer.logging_frequency 50 \
   --trainer.eval_interval 1000 \
   --run_root_dir "${run_root_dir}" \

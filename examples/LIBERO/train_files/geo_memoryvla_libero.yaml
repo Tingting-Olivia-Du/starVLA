@@ -3,8 +3,8 @@
 run_id: geo_memoryvla
 run_root_dir: playground/Checkpoints
 seed: 42
-wandb_entity: your_wandb_entity
-wandb_project: llavavla
+wandb_entity: tingtingdu06-uw-madison
+wandb_project: GeoMemVLA
 is_debug: false
 version_id: "0.21"
 
@@ -61,14 +61,14 @@ datasets:
     sequential_step_sampling: True   # [Geo-MemoryVLA] needed so memory sees ordered episodes
     # [Geo-MemoryVLA] declare the image_window modality (gated with imagination.enabled).
     enable_image_window: true
-    per_device_batch_size: 8
+    per_device_batch_size: 32
     load_all_data_for_training: true
     video_backend: torchvision_av
 
 trainer:
   max_train_steps: 100000
   num_warmup_steps: 5000
-  save_interval: 5000
+  save_interval: 10000
   eval_interval: 100
   learning_rate:
     base: 2.5e-05
@@ -85,7 +85,7 @@ trainer:
   weight_decay: 0.0
   logging_frequency: 10
   gradient_clipping: 1.0
-  gradient_accumulation_steps: 4
+  gradient_accumulation_steps: 
   gradient_checkpointing: true
   optimizer:
     name: AdamW

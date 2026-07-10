@@ -8,10 +8,12 @@
 # scene_flows are built EXACTLY like the verified pw_make_gt_flow: unproject t=0 depth -> assign to
 # objects by per-pixel body seg -> rigid-body transform object points by GT pose trajectory; static
 # background keeps t=0; robot points dropped.
-import argparse, json, os
+import argparse, json, os, sys
 import numpy as np
 import h5py
 import cv2
+sys.path.insert(0, "/workspace/tingting/starVLA")
+from starVLA.model.modules.langpw.libero_to_datadict import libero_gripper_open  # shared [0,1] mapping
 
 _PW_HW = (180, 320)
 
@@ -143,7 +145,10 @@ def main():
         g.create_dataset("joint_positions", data=joints.astype(np.float32))
         g.create_dataset("gripper_positions", data=gpos)
         g.create_dataset("gripper_pose", data=gp)
-        g.create_dataset("gripper_open", data=(gpos[:, None] > gpos.mean()))
+        # gripper_open = [0,1] open fraction (audit fix): was BOOLEAN 0/1, and build_from_sim fed a
+        # different (mean-jaw ≈0) value → train/inference mismatch + dead feature. Now BOTH use
+        # libero_gripper_open (|j0|+|j1| robust-normalized). Uses the demo's full gripper_states at ti.
+        g.create_dataset("gripper_open", data=libero_gripper_open(grip)[:, None])
     obj_ct = int((roles == "obj").sum())
     print(f"[pack-droid] {args.out} clip={args.clip_key} Ns={Ns} ({obj_ct} obj pts) scene_flows{scene_flows.shape}", flush=True)
     # self-check: object-point disp vs pose disp

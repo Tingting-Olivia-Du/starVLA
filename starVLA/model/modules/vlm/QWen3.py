@@ -50,7 +50,10 @@ class _QWen3_VL_Interface(nn.Module):
         qwenvl_config = config.framework.get("qwenvl", {})
         model_id = qwenvl_config.get("base_vlm", "Qwen/Qwen3-VL-4B-Instruct")
         attn_implementation = qwenvl_config.get("attn_implementation", "sdpa")
-        attn_implementation = "sdpa"
+        # [3DVLA-Stage1] removed hard `attn_implementation = "sdpa"` override:
+        # it silently discarded the config value (flash_attention_2) and cost
+        # large slowdowns on long sequences; the has_flash_attn fallback below
+        # already guards the unavailable case.
         # Fallback to sdpa if flash_attention_2 is requested but flash_attn is not installed
         if attn_implementation == "flash_attention_2":
             if not has_flash_attn():

@@ -68,7 +68,7 @@ def build_official_sample_dict(builder, geo, teacher, hdf5):
     }
     predictions = {"scene_flows": out["scene_flows"].numpy()}   # the teacher's imagination
     return sample_dict, predictions, os.path.basename(hdf5)
-
+o
 
 def main():
     ap = argparse.ArgumentParser()

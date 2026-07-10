@@ -102,5 +102,9 @@ def build_dataloader(cfg, dataset_py="lerobot_datasets_oxe"): # TODO now here on
     elif dataset_py == "vlm_datasets":
         vlm_data_module = make_vlm_dataloader(cfg)
         vlm_train_dataloader = vlm_data_module["train_dataloader"]
-        
+
         return vlm_train_dataloader
+    elif dataset_py == "vlm_datasets_3d":
+        # [3DVLA-Stage1] materialized mixture + focal unification
+        from starVLA.dataloader.vlm_datasets_3d import make_vlm_dataloader_3d
+        return make_vlm_dataloader_3d(cfg)["train_dataloader"]
