@@ -72,7 +72,9 @@ def prepare_data(cfg, accelerator, output_dir) -> Tuple[DataLoader, DataLoader]:
     vlm_train_dataloader = build_dataloader(cfg=cfg, dataset_py=cfg.datasets.vlm_data.dataset_py)
 
     accelerator.dataloader_config.dispatch_batches = False
-    dist.barrier()
+    # [3DVLA] guard: single-process (non-distributed) runs have no process group
+    if dist.is_initialized():
+        dist.barrier()
     return vla_train_dataloader, vlm_train_dataloader
 
 
@@ -230,7 +232,7 @@ class VLAMTrainer(TrainerUtils):
 
     def _log_metrics(self, metrics):
         """Record training metrics."""
-        if self.completed_steps % self.config.trainer.logging_frequency == 0 and dist.get_rank() == 0:
+        if self.completed_steps % self.config.trainer.logging_frequency == 0 and ((not dist.is_initialized()) or dist.get_rank() == 0):  # [3DVLA] guard
             last_lrs = self.lr_scheduler.get_last_lr()
             for i, group in enumerate(self.optimizer.param_groups):
                 group_name = group.get("name", str(i))
@@ -318,7 +320,8 @@ class VLAMTrainer(TrainerUtils):
 
             if optimizer_stepped and self.completed_steps % self.config.trainer.save_interval == 0 and self.completed_steps > 0:
                 self._save_checkpoint()
-                dist.barrier()
+                if dist.is_initialized():  # [3DVLA] guard
+                    dist.barrier()
 
             if self.completed_steps >= self.config.trainer.max_train_steps:
                 break
@@ -339,7 +342,8 @@ class VLAMTrainer(TrainerUtils):
             score = TrainerUtils.euclidean_distance(normalized_actions, actions)
             step_metrics["mse_score"] = score / num_pots
 
-        dist.barrier()
+        if dist.is_initialized():  # [3DVLA] guard
+            dist.barrier()
         return step_metrics
 
     def _log_training_config(self):
@@ -374,11 +378,17 @@ class VLAMTrainer(TrainerUtils):
                     vla_total_loss = vla_total_loss + imagination_loss
             self.model.backward(vla_total_loss)
 
-            with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-                unwrapped = self.accelerator.unwrap_model(self.model)
-                vlm_output = unwrapped.qwen_vl_interface(**batch_vlm)
-                vlm_loss = vlm_output.loss * self.config.trainer.loss_scale.vlm
-            self.model.backward(vlm_loss)
+            # [3DVLA] loss_scale.vlm == 0 -> skip the whole VLM stream (saves
+            # a full fwd+bwd per step; used by the time-boxed p25 arms)
+            if float(self.config.trainer.loss_scale.vlm) > 0:
+                with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                    unwrapped = self.accelerator.unwrap_model(self.model)
+                    vlm_output = unwrapped.qwen_vl_interface(**batch_vlm)
+                    vlm_loss = vlm_output.loss * self.config.trainer.loss_scale.vlm
+                if vlm_loss.requires_grad:  # [3DVLA] frozen-backbone smoke guard
+                    self.model.backward(vlm_loss)
+            else:
+                vlm_loss = torch.zeros((), device=action_loss.device)
 
             optimizer_stepped = bool(self.model.is_gradient_accumulation_boundary())
             self.model.step()
@@ -409,11 +419,15 @@ class VLAMTrainer(TrainerUtils):
                     total_loss = total_loss + imagination_loss
             self.accelerator.backward(total_loss)
 
-            with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-                unwrapped = self.accelerator.unwrap_model(self.model)
-                vlm_output = unwrapped.qwen_vl_interface(**batch_vlm)
-                vlm_loss = vlm_output.loss * self.config.trainer.loss_scale.vlm
-            self.accelerator.backward(vlm_loss)
+            if float(self.config.trainer.loss_scale.vlm) > 0:  # [3DVLA] see DS path
+                with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                    unwrapped = self.accelerator.unwrap_model(self.model)
+                    vlm_output = unwrapped.qwen_vl_interface(**batch_vlm)
+                    vlm_loss = vlm_output.loss * self.config.trainer.loss_scale.vlm
+                if vlm_loss.requires_grad:  # [3DVLA] frozen-backbone smoke guard
+                    self.accelerator.backward(vlm_loss)
+            else:
+                vlm_loss = torch.zeros((), device=action_loss.device)
 
             if self.config.trainer.gradient_clipping is not None:
                 self.accelerator.clip_grad_norm_(self.model.parameters(), self.config.trainer.gradient_clipping)
@@ -485,7 +499,8 @@ def main(cfg) -> None:
     trainer.train()
 
     logger.info("... and that's all, folks!")
-    dist.barrier()
+    if dist.is_initialized():  # [3DVLA] guard
+        dist.barrier()
     dist.destroy_process_group()
 
 
@@ -512,7 +527,7 @@ if __name__ == "__main__":
     # Store source config path for later copying to output dir
     cfg.config_yaml = args.config_yaml
 
-    if cfg.is_debug and dist.is_initialized() and dist.get_rank() == 0:
+    if cfg.is_debug and dist.is_initialized() and ((not dist.is_initialized()) or dist.get_rank() == 0):  # [3DVLA] guard
         import debugpy
 
         debugpy.listen(("0.0.0.0", 10092))

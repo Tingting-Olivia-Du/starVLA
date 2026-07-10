@@ -64,7 +64,7 @@ def make_LeRobotSingleDataset(
             dataset_name=data_name,
         )
 
-    return LeRobotSingleDataset(
+    ds = LeRobotSingleDataset(
         dataset_path=dataset_path,
         modality_configs=modality_config,
         transforms=transforms,
@@ -73,6 +73,43 @@ def make_LeRobotSingleDataset(
         delete_pause_frame=delete_pause_frame,
         data_cfg=data_cfg,
     )
+    # [3DVLA] optional episode filtering (leakage control + low-data arms).
+    # Episode ids are SUITE-LOCAL, so both filters resolve per suite:
+    #   ban_episodes_json -> drops the suite's "ban_episodes" (VLM-QA bench
+    #                        demos 45-49); used by full-data arms
+    #   lowdata_json + lowdata_budget ("p10"|"p25") -> per-suite whitelist =
+    #                        union of every task's {budget}_episodes; used by
+    #                        the low-data intervention arms
+    ban_json = data_cfg.get("ban_episodes_json", None) if data_cfg else None
+    lowdata_json = data_cfg.get("lowdata_json", None) if data_cfg else None
+    if ban_json or lowdata_json:
+        import json as _json
+        suite = data_name.split("_no_noops")[0]
+        drop = set()
+        if ban_json:
+            spec = _json.load(open(ban_json))
+            drop = set(spec.get(suite, {}).get("ban_episodes", []))
+        allow_set = None
+        if lowdata_json:
+            budget = data_cfg.get("lowdata_budget", "p25")
+            su = _json.load(open(lowdata_json)).get(suite, {})
+            allow_set = set()
+            for task, v in su.items():
+                if isinstance(v, dict) and f"{budget}_episodes" in v:
+                    allow_set.update(v[f"{budget}_episodes"])
+            assert allow_set, f"lowdata filter found no {budget}_episodes for {suite}"
+        n0 = len(ds.all_steps)
+        keep = ds.all_steps
+        if drop:
+            keep = [s for s in keep if s[0] not in drop]
+        if allow_set is not None:
+            keep = [s for s in keep if s[0] in allow_set]
+        ds._all_steps = keep
+        tag = f"lowdata:{data_cfg.get('lowdata_budget', 'p25')} " if lowdata_json else ""
+        print(f"[3DVLA] {data_name}: episode filter {n0} -> {len(keep)} steps "
+              f"({tag}banned {len(drop)})")
+        assert len(keep) > 0, f"episode filter emptied {data_name}"
+    return ds
 
 def get_vla_dataset(
     data_cfg: dict,

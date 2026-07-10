@@ -116,6 +116,17 @@ class QwenFastGR00TKIDefaultConfig:
             # HF hub id or absolute local path (the repo-relative default of
             # fast_ActionHeader only resolves from the starVLA repo root)
             "fast_tokenizer_path": "physical-intelligence/fast",
+            # Deployment-contract focal unification (plan §3.1: applied
+            # VERBATIM in VLA preprocessing). Per-view fx in PIXEL units of
+            # the incoming frames, listed in the data config's video_keys
+            # order. LIBERO lerobot 256x256: agentview fovy 45deg -> fx
+            # 579.41*(256/480)=309.02; wrist fovy ~75deg -> 312.77*(256/480)
+            # =166.81. Empty list = no unification (raw frames).
+            "view_fx": [],
+            "f_target": 600.0,
+            # HF gradient checkpointing on the backbone (the trainer yaml key
+            # is dead in the cotrain script; this knob actually applies it)
+            "gradient_checkpointing": False,
         }
     )
 
@@ -159,6 +170,30 @@ class Qwenvl_FastGR00T_KI(baseframework):
         emb = self.qwen_vl_interface.model.get_input_embeddings()
         emb.register_forward_hook(self._inject_action_embeds)
 
+        # Deployment-contract focal unification (per-view uniform resize to
+        # f_target; dynamic-resolution backbone -> no canvas, coords invariant)
+        self.view_fx = [float(x) for x in self.config.framework.ki.get("view_fx", [])]
+        self.f_target = float(self.config.framework.ki.get("f_target", 600.0))
+
+        if self.config.framework.ki.get("gradient_checkpointing", False):
+            self.qwen_vl_interface.model.gradient_checkpointing_enable()
+            logger.info("[KI] backbone gradient checkpointing ON")
+
+        # Optional Stage-1 graft: load a trained VLM checkpoint into the
+        # backbone (keys are framework-shaped: qwen_vl_interface.model.*).
+        stage1_ckpt = self.config.framework.qwenvl.get("stage1_ckpt", None)
+        if stage1_ckpt:
+            from safetensors.torch import load_file
+            sd = load_file(stage1_ckpt)
+            missing, unexpected = self.load_state_dict(sd, strict=False)
+            assert not unexpected, f"stage1 graft: unexpected keys {unexpected[:5]}"
+            bad = [k for k in missing
+                   if not (k.startswith(("action_embed", "action_lm_head",
+                                         "flow_action_model", "fast_action_model"))
+                           or "rotary_emb" in k or "position_ids" in k)]
+            assert not bad, f"stage1 graft: missing backbone keys {bad[:5]}"
+            logger.info(f"[KI] grafted Stage-1 backbone from {stage1_ckpt}")
+
         # Vocab logits are never consumed here (insulated head instead) —
         # truncate the lm_head projection to 1 position when supported
         # (saves ~[B,L,152K] bf16 per forward).
@@ -185,6 +220,28 @@ class Qwenvl_FastGR00T_KI(baseframework):
         output = output.clone()
         output[mask] = inj.to(output.dtype)
         return output
+
+    # ---------------------------------------------------------- focal unify
+    def _unify_views(self, batch_images):
+        """Apply the deployment-contract focal unification: per-view uniform
+        resize so fx -> f_target (dynamic-resolution backbone, no canvas)."""
+        if not self.view_fx:
+            return batch_images
+        from PIL import Image
+        out = []
+        for imgs in batch_images:
+            assert len(imgs) == len(self.view_fx), (
+                f"{len(imgs)} views != {len(self.view_fx)} configured view_fx")
+            row = []
+            for im, fx in zip(imgs, self.view_fx):
+                if not isinstance(im, Image.Image):
+                    im = Image.fromarray(np.asarray(im))
+                s = self.f_target / fx
+                row.append(im.resize((max(28, round(im.size[0] * s)),
+                                      max(28, round(im.size[1] * s))),
+                                     Image.BICUBIC))
+            out.append(row)
+        return out
 
     # ------------------------------------------------------------- fast utils
     def _encode_fast(self, actions) -> List[List[int]]:
@@ -223,7 +280,7 @@ class Qwenvl_FastGR00T_KI(baseframework):
 
     # ---------------------------------------------------------------- forward
     def forward(self, examples: List[dict] = None, **kwargs) -> dict:
-        batch_images = [ex["image"] for ex in examples]
+        batch_images = self._unify_views([ex["image"] for ex in examples])
         instructions = [ex["lang"] for ex in examples]
         actions = [ex["action"] for ex in examples]
         state = [ex["state"] for ex in examples] if "state" in examples[0] else None
@@ -281,7 +338,7 @@ class Qwenvl_FastGR00T_KI(baseframework):
         """Deployment form: flow expert on the prompt encoding (pi0.5-KI)."""
         if not isinstance(examples, list):
             examples = [examples]
-        batch_images = [ex["image"] for ex in examples]
+        batch_images = self._unify_views([ex["image"] for ex in examples])
         instructions = [ex["lang"] for ex in examples]
         state = [ex["state"] for ex in examples] if "state" in examples[0] else None
 
@@ -305,7 +362,7 @@ class Qwenvl_FastGR00T_KI(baseframework):
         cache (full re-forward per step) — probes/unit tests only."""
         if not isinstance(examples, list):
             examples = [examples]
-        batch_images = [ex["image"] for ex in examples]
+        batch_images = self._unify_views([ex["image"] for ex in examples])
         instructions = [ex["lang"] for ex in examples]
         qwen_inputs = self.qwen_vl_interface.build_qwenvl_inputs(
             images=batch_images, instructions=instructions)
