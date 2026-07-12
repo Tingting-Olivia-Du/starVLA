@@ -33,6 +33,9 @@ DATASET_NAMED_MIXTURES = {
     "bridge": [
         ("bridge_orig_1.0.0_lerobot", 1.0, "oxe_bridge"),
     ],
+    "fractal": [  # [3DVLA] fractal-alone arm
+        ("fractal20220817_data_0.1.0_lerobot", 1.0, "oxe_rt1"),
+    ],
     "bridge_rt_1": [
         ("bridge_orig_1.0.0_lerobot", 1.0, "oxe_bridge"),
         ("fractal20220817_data_0.1.0_lerobot", 1.0, "oxe_rt1"),

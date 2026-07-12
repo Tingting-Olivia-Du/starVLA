@@ -58,7 +58,10 @@ def setup_optimizer_and_scheduler(model, cfg) -> Tuple[torch.optim.Optimizer, to
     - cosine_with_min_lr (or any transformers scheduler) via cfg.trainer.lr_scheduler_type
     """
     param_groups = build_param_lr_groups(model=model, cfg=cfg)
-    fused_available = torch.cuda.is_available()
+    # [3DVLA] fused AdamW under DS-bf16 poisoned weights on step 1 (bridge
+    # arms, 2026-07-12): allow opt-out via cfg.trainer.optimizer.fused
+    fused_available = torch.cuda.is_available() and bool(
+        cfg.trainer.optimizer.get("fused", True))
     optimizer = torch.optim.AdamW(
         param_groups,
         lr=cfg.trainer.learning_rate.base,

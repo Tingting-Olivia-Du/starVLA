@@ -285,6 +285,29 @@ class Qwenvl_FastGR00T_KI(baseframework):
         actions = [ex["action"] for ex in examples]
         state = [ex["state"] for ex in examples] if "state" in examples[0] else None
 
+        # [3DVLA] fail-fast input guard: a single NaN (e.g. zero-range
+        # normalization stats) silently poisons ALL weights within one step —
+        # crash loudly instead (bridge state[6] q01==q99 lesson, 2026-07-12)
+        _a = np.asarray(actions, dtype=np.float64)
+        assert np.isfinite(_a).all(), (
+            f"[KI] non-finite ACTIONS in batch (dims with NaN/inf: "
+            f"{sorted(set(np.argwhere(~np.isfinite(_a))[:, -1].tolist()))}) — "
+            "check normalization stats for zero-range dims")
+        if state is not None:
+            _s = np.asarray(state, dtype=np.float64)
+            assert np.isfinite(_s).all(), (
+                f"[KI] non-finite STATE in batch (dims: "
+                f"{sorted(set(np.argwhere(~np.isfinite(_s))[:, -1].tolist()))}) — "
+                "check normalization stats for zero-range dims")
+
+        # [3DVLA] image guard: corrupt video decode can yield NaN frames
+        for bi, imgs in enumerate(batch_images):
+            for vi, im in enumerate(imgs):
+                arr = np.asarray(im, dtype=np.float32)
+                assert np.isfinite(arr).all(), (
+                    f"[KI] non-finite IMAGE batch[{bi}] view[{vi}] "
+                    f"(episode {examples[bi].get('episode_id')}) — corrupt video?")
+
         fast_ids = self._encode_fast(actions)
         slot_ids = [ids + [STOP_ID] for ids in fast_ids]  # input==label symmetry
 
@@ -329,6 +352,30 @@ class Qwenvl_FastGR00T_KI(baseframework):
                 h_flow, acts_target, state_rep, encoder_attention_mask=mask_rep)
 
         total = self.w_fast * fast_ce + self.w_flow * flow_loss
+        # [3DVLA] output guard: forensic report + dump, then crash loudly
+        if not torch.isfinite(total):
+            import os as _os
+            first_bad_layer = None
+            for li, hh in enumerate(outputs.hidden_states):
+                if not torch.isfinite(hh).all():
+                    first_bad_layer = li
+                    break
+            pv = qwen_inputs.get("pixel_values")
+            pv_stats = (f"pixel_values finite={bool(torch.isfinite(pv).all())} "
+                        f"min={float(pv.min()):.3f} max={float(pv.max()):.3f}"
+                        if pv is not None else "no pixel_values")
+            emb_w = self.qwen_vl_interface.model.get_input_embeddings().weight
+            dump = f"/workspace/tingting/3dvla-checkpoints/ki_nan_batch_{_os.getpid()}.pt"
+            torch.save({"examples": examples,
+                        "input_ids": qwen_inputs["input_ids"].cpu(),
+                        "attention_mask": qwen_inputs["attention_mask"].cpu(),
+                        "fast_ce": float(fast_ce), "flow_loss": float(flow_loss)}, dump)
+            raise RuntimeError(
+                f"[KI] non-finite loss (fast_ce={float(fast_ce)}, flow={float(flow_loss)}); "
+                f"FIRST NaN at hidden_states[{first_bad_layer}] of {len(outputs.hidden_states)}; "
+                f"{pv_stats}; embed_tokens finite={bool(torch.isfinite(emb_w).all())}; "
+                f"action_embed finite={bool(torch.isfinite(self.action_embed.weight).all())}; "
+                f"dump={dump}")
         return {"action_loss": total, "fast_ce": fast_ce.detach(),
                 "flow_loss": flow_loss.detach()}
 
